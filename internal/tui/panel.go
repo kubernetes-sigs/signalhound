@@ -11,6 +11,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/knabben/signalhound/api/v1alpha1"
 	"github.com/knabben/signalhound/internal/github"
+	"github.com/knabben/signalhound/internal/logger"
 	"github.com/rivo/tview"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -78,7 +79,7 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, githubToken string) error {
 	githubPanel.SetWrap(true)
 
 	// Final position bottom panel for information
-	var positionText = "[yellow]Select a content Windows and press [blue]Ctrl-Space [yellow]to COPY or press [blue]Ctrl-C [yellow]to exit"
+	var positionText = "[yellow]Select a content window and press [blue]Ctrl-Space [yellow]to COPY or press [blue]Ctrl-C [yellow]to exit"
 	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(positionText)
 
 	// Create the grid layout
@@ -137,6 +138,7 @@ func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResu
 			position.SetText("[blue]COPIED [yellow]SLACK [blue]TO THE CLIPBOARD!")
 			if err := CopyToClipboard(slackPanel.GetText()); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
+				logger.HandleError(err)
 				return event
 			}
 			setPanelFocusStyle(slackPanel.Box)
@@ -184,6 +186,7 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 	template, err := renderTemplate(issue, templateFile)
 	if err != nil {
 		position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
+		logger.HandleError(err)
 		return
 	}
 	issueTemplate := template.String()
@@ -197,6 +200,7 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 			position.SetText("[blue]COPIED [yellow]ISSUE [blue]TO THE CLIPBOARD!")
 			if err := CopyToClipboard(githubPanel.GetText()); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
+				logger.HandleError(err)
 				return event
 			}
 			setPanelFocusStyle(githubPanel.Box)
@@ -212,6 +216,7 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 			gh := github.NewGithub(context.Background(), token)
 			if err := gh.CreateDraftIssue(issueTitle, issueTemplate); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
+				logger.HandleError(err)
 				return event
 			}
 			position.SetText("[blue]Created [yellow]DRAFT ISSUE [blue] on GitHub Project!")
@@ -280,7 +285,9 @@ func CopyToClipboard(text string) error {
 		}
 
 	default:
-		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+		err := fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+		logger.HandleError(err)
+		return err
 	}
 
 	return cmd.Run()
