@@ -74,7 +74,7 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, githubToken string) error {
 
 	// GitHub panel rendering
 	setPanelDefaultStyle(githubPanel.Box)
-	githubPanel.SetTitle(formatTitle("Github Issue"))
+	githubPanel.SetTitle(formatTitle("Github Issue Exists!"))
 	githubPanel.SetWrap(true)
 
 	// Final position bottom panel for information
@@ -181,6 +181,11 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 	if tab.TabState == v1alpha1.FAILING_STATUS {
 		templateFile, prefixTitle = "template/failure.tmpl", "Failing Test"
 	}
+	// TODO: add status of "GITHUB_ISSUE_EXISTS" and load different template
+	// if tab.TabState == v1alpha1.GITHUB_ISSUE_EXISTS_STATUS {
+	templateFile, prefixTitle = "template/github-issue-exists.tmpl", "GitHub Issue Exists"
+	// }
+
 	template, err := renderTemplate(issue, templateFile)
 	if err != nil {
 		position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
