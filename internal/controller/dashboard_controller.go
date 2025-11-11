@@ -74,7 +74,7 @@ func initMetrics() error {
 	meter := otel.Meter(meterName)
 
 	dashboardStateGauge, err := meter.Int64Gauge(
-		"testgrid.dashboard.state",
+		"testgrid_dashboard_state",
 		metric.WithDescription("Current state of testgrid dashboard (1 = active state)"),
 		metric.WithUnit("1"),
 	)
@@ -83,7 +83,7 @@ func initMetrics() error {
 	}
 
 	tabStateGauge, err := meter.Int64Gauge(
-		"testgrid.tab.state",
+		"testgrid_tab_state",
 		metric.WithDescription("State of testgrid dashboard tab"),
 		metric.WithUnit("1"),
 	)
@@ -92,7 +92,7 @@ func initMetrics() error {
 	}
 
 	lastRunTimestamp, err := meter.Int64Gauge(
-		"testgrid.dashboard.last_run_timestamp",
+		"testgrid_dashboard_last_run_timestamp",
 		metric.WithDescription("Unix timestamp of the last test run for a dashboard tab"),
 		metric.WithUnit("s"),
 	)
@@ -101,7 +101,7 @@ func initMetrics() error {
 	}
 
 	lastUpdateTimestamp, err := meter.Int64Gauge(
-		"testgrid.dashboard.last_update_timestamp",
+		"testgrid_dashboard_last_update_timestamp",
 		metric.WithDescription("Unix timestamp of the last update for a dashboard tab"),
 		metric.WithUnit("s"),
 	)
@@ -110,7 +110,7 @@ func initMetrics() error {
 	}
 
 	totalTestFailures, err := meter.Int64Gauge(
-		"testgrid.test.failures_total",
+		"testgrid_test_failures_total",
 		metric.WithDescription("Total number of failing tests in a dashboard tab"),
 		metric.WithUnit("1"),
 	)
@@ -119,7 +119,7 @@ func initMetrics() error {
 	}
 
 	totalTestFlakes, err := meter.Int64Gauge(
-		"testgrid.test.flakes_total",
+		"testgrid_test_flakes_total",
 		metric.WithDescription("Total number of flaky tests in a dashboard tab"),
 		metric.WithUnit("1"),
 	)
@@ -128,7 +128,7 @@ func initMetrics() error {
 	}
 
 	testFailuresCounter, err := meter.Int64Counter(
-		"testgrid.individual_test.failures_total",
+		"testgrid_individual_test_failures_total",
 		metric.WithDescription("Counter of failures for individual tests"),
 		metric.WithUnit("1"),
 	)
@@ -239,7 +239,7 @@ func (r *DashboardReconciler) recordMetrics(ctx context.Context, dashSummary *te
 	tabAttr := attribute.String("tab", tabName)
 
 	// record dashboard-level state metrics
-	overallStateAttr := attribute.String("state", dashSummary.CurrentState)
+	overallStateAttr := attribute.String("overall_state", dashSummary.OverallState)
 	globalMetrics.dashboardStateGauge.Record(ctx, 1,
 		metric.WithAttributes(dashboardAttr, tabAttr, overallStateAttr))
 
