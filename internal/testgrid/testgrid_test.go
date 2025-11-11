@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/knabben/signalhound/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/signalhound/api/v1alpha1"
 )
 
 const dashboard, tabName = "sig-release-blocking", "kubernetes-ci"

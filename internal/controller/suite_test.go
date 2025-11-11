@@ -32,7 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	testgridv1alpha1 "github.com/knabben/signalhound/api/v1alpha1"
+	testgridv1alpha1 "sigs.k8s.io/signalhound/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 

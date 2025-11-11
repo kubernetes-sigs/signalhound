@@ -18,23 +18,136 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"reflect"
 	"time"
 
 	"github.com/go-logr/logr"
-	testgridv1alpha1 "github.com/knabben/signalhound/api/v1alpha1"
-	"github.com/knabben/signalhound/internal/testgrid"
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	testgridv1alpha1 "sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/testgrid"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"go.opentelemetry.io/otel/exporters/prometheus"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+const meterName = "signalhound"
+
+// Metrics holds OpenTelemetry metric instruments
+type Metrics struct {
+	dashboardStateGauge metric.Int64Gauge
+	tabStateGauge       metric.Int64Gauge
+	lastRunTimestamp    metric.Int64Gauge
+	lastUpdateTimestamp metric.Int64Gauge
+	totalTestFailures   metric.Int64Gauge
+	totalTestFlakes     metric.Int64Gauge
+	testFailuresCounter metric.Int64Counter
+}
+
+// globalMetrics holds the initialized metrics
+var globalMetrics *Metrics
+
+func init() {
+	exporter, err := prometheus.New(
+		prometheus.WithRegisterer(metrics.Registry),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	provider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(exporter),
+	)
+	otel.SetMeterProvider(provider)
+}
+
+// initMetrics initializes OpenTelemetry metrics
+func initMetrics() error {
+	meter := otel.Meter(meterName)
+
+	dashboardStateGauge, err := meter.Int64Gauge(
+		"testgrid_dashboard_state",
+		metric.WithDescription("Current state of testgrid dashboard (1 = active state)"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return err
+	}
+
+	tabStateGauge, err := meter.Int64Gauge(
+		"testgrid_tab_state",
+		metric.WithDescription("State of testgrid dashboard tab"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lastRunTimestamp, err := meter.Int64Gauge(
+		"testgrid_dashboard_last_run_timestamp",
+		metric.WithDescription("Unix timestamp of the last test run for a dashboard tab"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lastUpdateTimestamp, err := meter.Int64Gauge(
+		"testgrid_dashboard_last_update_timestamp",
+		metric.WithDescription("Unix timestamp of the last update for a dashboard tab"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return err
+	}
+
+	totalTestFailures, err := meter.Int64Gauge(
+		"testgrid_test_failures_total",
+		metric.WithDescription("Total number of failing tests in a dashboard tab"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return err
+	}
+
+	totalTestFlakes, err := meter.Int64Gauge(
+		"testgrid_test_flakes_total",
+		metric.WithDescription("Total number of flaky tests in a dashboard tab"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return err
+	}
+
+	testFailuresCounter, err := meter.Int64Counter(
+		"testgrid_individual_test_failures_total",
+		metric.WithDescription("Counter of failures for individual tests"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return err
+	}
+
+	globalMetrics = &Metrics{
+		dashboardStateGauge: dashboardStateGauge,
+		tabStateGauge:       tabStateGauge,
+		lastRunTimestamp:    lastRunTimestamp,
+		lastUpdateTimestamp: lastUpdateTimestamp,
+		totalTestFailures:   totalTestFailures,
+		totalTestFlakes:     totalTestFlakes,
+		testFailuresCounter: testFailuresCounter,
+	}
+
+	return nil
+}
 
 // DashboardReconciler reconciles a Dashboard object
 type DashboardReconciler struct {
@@ -51,9 +164,20 @@ type DashboardReconciler struct {
 func (r *DashboardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.log = logf.FromContext(ctx).WithValues("resource", req.NamespacedName)
 
+	// Create a span for tracing
+	tracer := otel.Tracer(meterName)
+	ctx, span := tracer.Start(ctx, "DashboardReconcile")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("dashboard.name", req.Name),
+		attribute.String("dashboard.namespace", req.Namespace),
+	)
+
 	var dashboard testgridv1alpha1.Dashboard
 	if err := r.Get(ctx, req.NamespacedName, &dashboard); err != nil {
 		r.log.Error(err, "unable to fetch dashboard")
+		span.RecordError(err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -61,8 +185,11 @@ func (r *DashboardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	dashboardSummaries, err := grid.FetchTabSummary(dashboard.Spec.DashboardTab, testgridv1alpha1.ERROR_STATUSES)
 	if err != nil {
 		r.log.Error(err, "error fetching summary from endpoint.")
+		span.RecordError(err)
 		return ctrl.Result{}, err
 	}
+
+	span.SetAttributes(attribute.Int("summaries.count", len(dashboardSummaries)))
 
 	// set the dashboard summary on status if an update happened
 	if r.shouldRefresh(dashboard.Status, dashboardSummaries) {
@@ -72,69 +199,92 @@ func (r *DashboardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.log.Info("updating dashboard object status.")
 		if err := r.Status().Update(ctx, &dashboard); err != nil {
 			r.log.Error(err, "unable to update dashboard status")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 
-		// create or update the tab summary board if necessary
 		for _, dashSummary := range dashboardSummaries {
 			tabName := dashSummary.DashboardTab.TabName
-			configMapKey := client.ObjectKey{
-				Namespace: req.Namespace,
-				Name:      fmt.Sprintf("%s-%s", dashSummary.DashboardName, tabName),
-			}
 
 			var tab *testgridv1alpha1.DashboardTab
 			if tab, err = grid.FetchTabTests(&dashSummary, dashboard.Spec.MinFlakes, dashboard.Spec.MinFailures); err != nil {
 				r.log.Error(err, "error fetching table", "tab", tabName)
+				span.RecordError(err)
 				continue
 			}
 
-			configMap, err := buildTestConfigMap(configMapKey, tab)
-			if err != nil {
-				r.log.Error(err, "failed to build ConfigMap", "name", configMapKey.Name)
-				continue
-			}
-			if err = r.createOrUpdateConfigmap(ctx, configMapKey, configMap); err != nil {
-				r.log.Error(err, "unable to create update a configmap")
-				continue
-			}
+			// record metrics for this tab summary
+			r.recordMetrics(ctx, &dashSummary, tab)
 		}
 	}
+
+	r.log.V(1).Info("reconciliation completed successfully")
+	span.SetAttributes(attribute.Bool("reconcile.success", true))
 
 	return ctrl.Result{}, nil
 }
 
-// createOrUpdateConfigmap creates or updates ConfigMaps for each dashboard tab
-// containing the test data retrieved from TestGrid.
-func (r *DashboardReconciler) createOrUpdateConfigmap(
-	ctx context.Context,
-	configMapKey client.ObjectKey,
-	configMap *v1.ConfigMap,
-) (err error) {
-	if !r.doesExistsConfigmap(ctx, configMapKey) {
-		if err := r.Create(ctx, configMap); err != nil {
-			return fmt.Errorf("failed to create ConfigMap %s: %w", configMapKey.Name, err)
-		}
-		r.log.Info("created ConfigMap", "configmap", configMapKey.Name)
-
-	} else {
-		if err = r.Update(ctx, configMap); err != nil {
-			return fmt.Errorf("failed to update ConfigMap %s: %w", configMapKey.Name, err)
-		}
-		r.log.V(1).Info("updated ConfigMap", "configmap", configMapKey.Name)
-
+// recordMetrics records OpenTelemetry metrics for testgrid dashboard failures and flakes
+func (r *DashboardReconciler) recordMetrics(ctx context.Context, dashSummary *testgridv1alpha1.DashboardSummary, tab *testgridv1alpha1.DashboardTab) {
+	if globalMetrics == nil {
+		r.log.Error(nil, "metrics not initialized")
+		return
 	}
-	return nil
-}
 
-func (r *DashboardReconciler) doesExistsConfigmap(ctx context.Context, key client.ObjectKey) bool {
-	var cm = &v1.ConfigMap{}
-	if err := r.Get(ctx, key, cm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true
-		}
+	dashboardName := dashSummary.DashboardName
+	tabName := dashSummary.DashboardTab.TabName
+
+	// common attributes for all metrics
+	dashboardAttr := attribute.String("dashboard", dashboardName)
+	tabAttr := attribute.String("tab", tabName)
+
+	// record dashboard-level state metrics
+	overallStateAttr := attribute.String("overall_state", dashSummary.OverallState)
+	globalMetrics.dashboardStateGauge.Record(ctx, 1,
+		metric.WithAttributes(dashboardAttr, tabAttr, overallStateAttr))
+
+	currentStateAttr := attribute.String("state", dashSummary.CurrentState)
+	globalMetrics.dashboardStateGauge.Record(ctx, 1,
+		metric.WithAttributes(dashboardAttr, tabAttr, currentStateAttr))
+
+	// record timestamp metrics
+	if dashSummary.LastRunTime > 0 {
+		globalMetrics.lastRunTimestamp.Record(ctx, dashSummary.LastRunTime,
+			metric.WithAttributes(dashboardAttr, tabAttr))
 	}
-	return false
+	if dashSummary.LastUpdateTime > 0 {
+		globalMetrics.lastUpdateTimestamp.Record(ctx, dashSummary.LastUpdateTime,
+			metric.WithAttributes(dashboardAttr, tabAttr))
+	}
+
+	// set metric for specific test
+	for _, testResult := range tab.TestRuns {
+		testNameAttr := attribute.String("test_name", testResult.TestName)
+		tabState := attribute.String("tab_state", tab.TabState)
+		globalMetrics.testFailuresCounter.Add(ctx, 1,
+			metric.WithAttributes(dashboardAttr, tabAttr, testNameAttr, tabState))
+	}
+
+	// record aggregate counts based on tab state
+	switch tab.TabState {
+	case testgridv1alpha1.FAILING_STATUS:
+		globalMetrics.totalTestFailures.Record(ctx, int64(len(tab.TestRuns)),
+			metric.WithAttributes(dashboardAttr, tabAttr))
+	case testgridv1alpha1.FLAKY_STATUS:
+		globalMetrics.totalTestFlakes.Record(ctx, int64(len(tab.TestRuns)),
+			metric.WithAttributes(dashboardAttr, tabAttr))
+	}
+
+	// record final tab state gauge
+	tabStateAttr := attribute.String("state", tab.TabState)
+	globalMetrics.tabStateGauge.Record(ctx, 1,
+		metric.WithAttributes(dashboardAttr, tabAttr, tabStateAttr))
+
+	r.log.V(1).Info("recorded metrics",
+		"dashboard", dashboardName,
+		"tab", tabName,
+		"tab_state", tab.TabState,
+		"tests", len(tab.TestRuns))
 }
 
 // shouldRefresh determines if it's time to refresh the dashboard data
@@ -149,24 +299,12 @@ func (r *DashboardReconciler) shouldRefresh(dashboardStatus testgridv1alpha1.Das
 	return time.Since(dashboardStatus.LastUpdate.Time) >= refreshInterval
 }
 
-func buildTestConfigMap(key client.ObjectKey, tab *testgridv1alpha1.DashboardTab) (*v1.ConfigMap, error) {
-	data, err := json.Marshal(tab)
-	if err != nil {
-		return nil, err
-	}
-	return &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      key.Name,
-			Namespace: key.Namespace,
-		},
-		Data: map[string]string{
-			"data": base64.StdEncoding.EncodeToString(data),
-		},
-	}, nil
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *DashboardReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := initMetrics(); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&testgridv1alpha1.Dashboard{}).
 		Named("dashboard").

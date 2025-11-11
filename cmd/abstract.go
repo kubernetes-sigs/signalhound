@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/knabben/signalhound/api/v1alpha1"
-	"github.com/knabben/signalhound/internal/testgrid"
-	"github.com/knabben/signalhound/internal/tui"
 	"github.com/spf13/cobra"
+	"sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/testgrid"
+	"sigs.k8s.io/signalhound/internal/tui"
 )
 
 // abstractCmd represents the abstract command

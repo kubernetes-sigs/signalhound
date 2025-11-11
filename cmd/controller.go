@@ -22,8 +22,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	testgridv1alpha1 "github.com/knabben/signalhound/api/v1alpha1"
-	"github.com/knabben/signalhound/internal/controller"
+	testgridv1alpha1 "sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

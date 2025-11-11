@@ -59,7 +59,7 @@ export GITHUB_TOKEN=<github.pat.default>
 ### Running at runtime
 
 ```bash
-git clone https://github.com/knabben/signalhound.git
+git clone https://github.com/kubernetes-sigs/signalhound.git
 cd signalhound
 make run  # for abstract and standalone
 make run-controller # for running the controller outside the cluster

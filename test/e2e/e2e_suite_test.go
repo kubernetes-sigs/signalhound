@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/knabben/signalhound/test/utils"
+	"sigs.k8s.io/signalhound/test/utils"
 )
 
 var (

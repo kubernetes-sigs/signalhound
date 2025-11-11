@@ -97,7 +97,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: run-controller
 run-controller: manifests generate fmt vet ## Run a controller from your host.
-	go run ./main.go controller
+	go run ./main.go controller --metrics-bind-address :8080 --metrics-secure=false
 
 .PHONY: run
 run:
