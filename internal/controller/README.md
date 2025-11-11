@@ -1,6 +1,6 @@
 # Controller Metrics
 
-The SignalHound controller now exports Prometheus metrics for TestGrid dashboard monitoring. 
+The SignalHound controller exports Prometheus metrics for TestGrid dashboard monitoring. 
 This document describes the available metrics and their usage.
 
 ## Overview
