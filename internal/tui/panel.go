@@ -247,19 +247,16 @@ func timeClean(ts int64) string {
 // CopyToClipboard pipes the panel content to clip.exe WSL.
 func CopyToClipboard(text string) error {
 	var cmd *exec.Cmd
-
 	// Detect the operating system and use appropriate clipboard command
 	switch runtime.GOOS {
 	case "windows":
 		// Native Windows
 		cmd = exec.Command("cmd", "/c", "echo "+text+" | clip")
 		// Alternative: cmd = exec.Command("powershell", "-command", "Set-Clipboard", "-Value", text)
-
 	case "darwin":
 		// macOS
 		cmd = exec.Command("pbcopy")
 		cmd.Stdin = strings.NewReader(text)
-
 	case "linux":
 		// Linux - need to check for available clipboard manager
 		// Try different clipboard managers in order of preference
@@ -282,7 +279,5 @@ func CopyToClipboard(text string) error {
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
-
 	return cmd.Run()
-
 }

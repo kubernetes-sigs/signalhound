@@ -268,10 +268,10 @@ func (r *DashboardReconciler) recordMetrics(ctx context.Context, dashSummary *te
 	// record aggregate counts based on tab state
 	switch tab.TabState {
 	case testgridv1alpha1.FAILING_STATUS:
-		globalMetrics.totalTestFailures.Record(ctx, failureCount,
+		globalMetrics.totalTestFailures.Record(ctx, int64(len(tab.TestRuns)),
 			metric.WithAttributes(dashboardAttr, tabAttr))
 	case testgridv1alpha1.FLAKY_STATUS:
-		globalMetrics.totalTestFlakes.Record(ctx, flakeCount,
+		globalMetrics.totalTestFlakes.Record(ctx, int64(len(tab.TestRuns)),
 			metric.WithAttributes(dashboardAttr, tabAttr))
 	}
 
