@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -14,24 +15,40 @@ import (
 	"golang.org/x/text/language"
 	"sigs.k8s.io/signalhound/api/v1alpha1"
 	"sigs.k8s.io/signalhound/internal/github"
+	intmcp "sigs.k8s.io/signalhound/internal/mcp"
+	"sigs.k8s.io/signalhound/internal/testgrid"
 )
 
-const defaultPositionText = "[green]Select a content Windows and press [blue]Ctrl-Space [green]to COPY or press [blue]Ctrl-C [green]to exit"
-
-var (
-	pagesName         = "SignalHound"
-	app               *tview.Application // The tview application.
-	pages             *tview.Pages       // The application pages.
-	tabsPanel         *tview.List        // The tabs panel (needs to be accessible for updates)
-	brokenPanel       = tview.NewList()
-	slackPanel        = tview.NewTextArea()
-	githubPanel       = tview.NewTextArea()
-	position          = tview.NewTextView()
-	currentTabs       []*v1alpha1.DashboardTab // Store current tabs for refresh
-	githubToken       string                   // Store token for refresh
-	selectedBoardHash string                   // Store selected BoardHash for refresh preservation
-	selectedTestName  string                   // Store selected test name for refresh preservation
+const (
+	defaultMCPEndpoint     = "http://localhost:8080/mcp"
+	errorMsgFormat         = "Error calling MCP tool: %v"
+	successMsg             = "[green]✓ Analysis Completed"
+	defaultRefreshInterval = 10 * time.Minute
 )
+
+// MultiWindowTUI represents the multi-window TUI application
+type MultiWindowTUI struct {
+	app             *tview.Application
+	pages           *tview.Pages
+	tabs            []*v1alpha1.DashboardTab
+	githubToken     string
+	brokenTestsPage *tview.Flex
+	mcpIssuesPage   *tview.Flex
+	mcpPanelRef     *tview.TextArea
+	statusPanelRef  *tview.TextView
+	tabsPanelRef    *tview.List
+	brokenPanelRef  *tview.List
+	slackPanelRef   *tview.TextArea
+	githubPanelRef  *tview.TextArea
+	positionRef     *tview.TextView
+	// Auto-refresh fields
+	refreshTicker  *time.Ticker
+	testgridClient *testgrid.TestGrid
+	dashboards     []string
+	minFailure     int
+	minFlake       int
+	refreshStopCh  chan struct{}
+}
 
 func formatTitle(txt string) string {
 	// var titleColor = "green"
@@ -56,203 +73,420 @@ func setPanelFocusStyle(p *tview.Box) {
 	p.SetBorderColor(tcell.ColorBlue)
 	p.SetTitleColor(tcell.ColorBlue)
 	p.SetBackgroundColor(tcell.ColorDarkBlue)
-	app.SetFocus(p)
 }
 
-// updateTabsPanel updates the tabs panel with new data while preserving selection if possible.
-func updateTabsPanel(tabs []*v1alpha1.DashboardTab) {
-	if tabsPanel == nil {
-		return
+// NewMultiWindowTUI creates a new MultiWindowTUI instance
+func NewMultiWindowTUI(tabs []*v1alpha1.DashboardTab, githubToken string) *MultiWindowTUI {
+	return &MultiWindowTUI{
+		app:           tview.NewApplication(),
+		pages:         tview.NewPages(),
+		tabs:          tabs,
+		githubToken:   githubToken,
+		refreshStopCh: make(chan struct{}),
+	}
+}
+
+// SetRefreshConfig sets the configuration for auto-refresh
+func (m *MultiWindowTUI) SetRefreshConfig(tg *testgrid.TestGrid, dashboards []string, minFailure, minFlake int) {
+	m.testgridClient = tg
+	m.dashboards = dashboards
+	m.minFailure = minFailure
+	m.minFlake = minFlake
+}
+
+// Run starts the TUI application
+func (m *MultiWindowTUI) Run() error {
+	// Create all views
+	m.brokenTestsPage = m.createBrokenTestsView()
+	m.mcpIssuesPage = m.createMCPIssuesView()
+
+	// Add pages
+	m.pages.AddPage("broken_tests", m.brokenTestsPage, true, true)
+	m.pages.AddPage("mcp_issues", m.mcpIssuesPage, true, false)
+
+	// Set up global key handler
+	m.app.SetInputCapture(m.globalKeyHandler)
+
+	// Start auto-refresh if configured
+	if m.testgridClient != nil {
+		m.startAutoRefresh()
 	}
 
-	// Store current selection before clearing
-	if tabsPanel.GetItemCount() > 0 {
-		currentIndex := tabsPanel.GetCurrentItem()
-		if currentIndex >= 0 && currentIndex < len(currentTabs) {
-			selectedBoardHash = currentTabs[currentIndex].BoardHash
-			// Store selected test name if brokenPanel has items
-			if brokenPanel.GetItemCount() > 0 {
-				testIndex := brokenPanel.GetCurrentItem()
-				if testIndex >= 0 && testIndex < brokenPanel.GetItemCount() {
-					_, selectedTestName = brokenPanel.GetItemText(testIndex)
-				}
-			}
-		}
+	// Cleanup on exit
+	defer m.stopAutoRefresh()
+
+	return m.app.SetRoot(m.pages, true).EnableMouse(true).Run()
+}
+
+// globalKeyHandler handles global keyboard shortcuts for navigation
+func (m *MultiWindowTUI) globalKeyHandler(event *tcell.EventKey) *tcell.EventKey {
+	// handle F1 for broken tests
+	if event.Key() == tcell.KeyF1 {
+		m.pages.SwitchToPage("broken_tests")
+		return nil
 	}
+	// handle F2 for MCP issues
+	if event.Key() == tcell.KeyF2 {
+		m.pages.SwitchToPage("mcp_issues")
+		return nil
+	}
+	// handle Ctrl-C for exit
+	if event.Key() == tcell.KeyCtrlC {
+		m.app.Stop()
+		return nil
+	}
+	return event
+}
 
-	// Clear and rebuild the tabs panel
-	tabsPanel.Clear()
-	// Map to store tab selection callbacks by BoardHash for restoration
-	tabCallbacks := make(map[string]func())
+// createBrokenTestsView creates the broken tests view with tabs, tests, slack, and github panels
+func (m *MultiWindowTUI) createBrokenTestsView() *tview.Flex {
 
-	for _, tab := range tabs {
+	// Header panel with keybindings
+	headerPanel := tview.NewTextView()
+	setPanelDefaultStyle(headerPanel.Box)
+	headerPanel.SetTitle(formatTitle("Keybindings"))
+	headerPanel.SetDynamicColors(true)
+	headerText := `[white]Actions: [yellow]Ctrl-Space[white] Copy  [yellow]Ctrl-B[white] Create Issue  [yellow]F-1[white] Broken Tests  [yellow]F-2[white] MCP Issues  [yellow]Ctrl-C[white] Exit`
+	headerPanel.SetText(headerText)
+
+	// Render tab in the first row
+	tabsPanel := tview.NewList().ShowSecondaryText(false)
+	setPanelDefaultStyle(tabsPanel.Box)
+	tabsPanel.SetTitle(formatTitle("Board - Tabs"))
+
+	// Broken tests in the tab
+	brokenPanel := tview.NewList().ShowSecondaryText(false)
+	brokenPanel.SetDoneFunc(func() { m.app.SetFocus(tabsPanel) })
+	setPanelDefaultStyle(brokenPanel.Box)
+	brokenPanel.SetTitle(formatTitle("Tests"))
+
+	// Slack Final issue rendering
+	slackPanel := tview.NewTextArea()
+	setPanelDefaultStyle(slackPanel.Box)
+	slackPanel.SetTitle(formatTitle("Slack Message"))
+	slackPanel.SetWrap(true).SetDisabled(true)
+
+	// GitHub panel rendering
+	githubPanel := tview.NewTextArea()
+	setPanelDefaultStyle(githubPanel.Box)
+	githubPanel.SetTitle(formatTitle("Github Issue"))
+	githubPanel.SetWrap(true)
+
+	// Final position bottom panel for information
+	position := tview.NewTextView()
+	var positionText = "[yellow]Select a test to view details"
+	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(positionText)
+
+	// Tabs iteration for building the middle panels and actions settings
+	for _, tab := range m.tabs {
 		icon := "🟣"
 		if tab.TabState == v1alpha1.FAILING_STATUS {
 			icon = "🔴"
 		}
-		tabText := fmt.Sprintf("[%s] %s", icon, strings.ReplaceAll(tab.BoardHash, "#", " - "))
-
-		// Create selection callback for this tab
-		tabCallback := func(tab *v1alpha1.DashboardTab) func() {
-			return func() {
-				// Store the selected BoardHash when user manually selects a tab
-				selectedBoardHash = tab.BoardHash
-				selectedTestName = "" // Clear test selection when tab changes
-
-				brokenPanel.Clear()
-				for _, test := range tab.TestRuns {
-					brokenPanel.AddItem(tview.Escape(test.TestName), "", 0, nil)
-				}
-				app.SetFocus(brokenPanel)
-				brokenPanel.SetCurrentItem(0)
-				brokenPanel.SetChangedFunc(func(i int, testName string, secondaryText string, shortcut rune) {
-					position.SetText(defaultPositionText)
-					// Store the selected test name when user navigates tests
-					if i >= 0 && i < brokenPanel.GetItemCount() {
-						_, selectedTestName = brokenPanel.GetItemText(i)
-					}
-				})
-				// Broken panel rendering the function selection
-				brokenPanel.SetSelectedFunc(func(i int, testName string, secondaryText string, shortcut rune) {
-					// Store the selected test name
-					selectedTestName = testName
-					var currentTest = tab.TestRuns[i]
-					updateSlackPanel(tab, &currentTest)
-					updateGitHubPanel(tab, &currentTest, githubToken)
-					app.SetFocus(slackPanel)
-				})
+		tabCopy := tab // Capture for closure
+		tabsPanel.AddItem(fmt.Sprintf("[%s] %s", icon, strings.ReplaceAll(tab.BoardHash, "#", " - ")), "", 0, func() {
+			brokenPanel.Clear()
+			for _, test := range tabCopy.TestRuns {
+				brokenPanel.AddItem(test.TestName, "", 0, nil)
 			}
-		}(tab)
-
-		tabCallbacks[tab.BoardHash] = tabCallback
-		tabsPanel.AddItem(tabText, "", 0, tabCallback)
+			m.app.SetFocus(brokenPanel)
+			brokenPanel.SetCurrentItem(0)
+			brokenPanel.SetChangedFunc(func(i int, testName string, t string, s rune) {
+				position.SetText(fmt.Sprintf("[blue] selected %s test ", testName))
+			})
+			// Broken panel rendering the function selection
+			brokenPanel.SetSelectedFunc(func(i int, testName string, t string, s rune) {
+				var currentTest = tabCopy.TestRuns[i]
+				m.updateSlackPanel(slackPanel, tabCopy, &currentTest, position)
+				m.updateGitHubPanel(githubPanel, tabCopy, &currentTest, position)
+				m.app.SetFocus(slackPanel)
+			})
+			position.SetText(fmt.Sprintf("[blue] selected %s board", tab.TabName))
+		})
 	}
 
-	// Update stored tabs
-	currentTabs = tabs
+	// Store panel references for navigation setup
+	m.tabsPanelRef = tabsPanel
+	m.brokenPanelRef = brokenPanel
+	m.slackPanelRef = slackPanel
+	m.githubPanelRef = githubPanel
+	m.positionRef = position
 
-	// Try to restore selection by BoardHash
-	if selectedBoardHash != "" {
-		for i, tab := range tabs {
-			if tab.BoardHash == selectedBoardHash {
-				tabsPanel.SetCurrentItem(i)
-				// Save test selection before callback clears it
-				savedTestName := selectedTestName
-				// Trigger the selection callback to restore brokenPanel
-				if callback, exists := tabCallbacks[selectedBoardHash]; exists {
-					callback()
-					// Restore test selection if it exists
-					if savedTestName != "" {
-						for j := 0; j < brokenPanel.GetItemCount(); j++ {
-							testName, _ := brokenPanel.GetItemText(j)
-							if testName == savedTestName {
-								brokenPanel.SetCurrentItem(j)
-								selectedTestName = savedTestName // Restore the stored value
-								break
-							}
-						}
-					}
-				}
-				break
+	// Set up navigation keybindings for panels
+	m.setupPanelNavigation()
+
+	// Create the grid layout
+	// Row sizes: header(3), tabs(10), broken(10), slack/github(flexible), position(1)
+	grid := tview.NewGrid().SetRows(3, 10, 10, 0, 0, 1).
+		AddItem(headerPanel, 0, 0, 1, 2, 0, 0, false).
+		AddItem(tabsPanel, 1, 0, 1, 2, 0, 0, true).
+		AddItem(brokenPanel, 2, 0, 1, 2, 0, 0, false).
+		AddItem(slackPanel, 3, 0, 2, 1, 0, 0, false).
+		AddItem(githubPanel, 3, 1, 2, 1, 0, 0, false).
+		AddItem(position, 5, 0, 1, 2, 0, 0, false)
+	return tview.NewFlex().SetDirection(tview.FlexRow).AddItem(grid, 0, 1, true)
+}
+
+// startAutoRefresh starts the auto-refresh ticker for broken tests
+func (m *MultiWindowTUI) startAutoRefresh() {
+	if m.refreshTicker != nil {
+		return // Already started
+	}
+	m.refreshBrokenTestsAsync()
+	m.refreshTicker = time.NewTicker(defaultRefreshInterval)
+	go func() {
+		for {
+			select {
+			case <-m.refreshTicker.C:
+				m.refreshBrokenTestsAsync()
+			case <-m.refreshStopCh:
+				return
 			}
 		}
+	}()
+}
+
+// stopAutoRefresh stops the auto-refresh ticker
+func (m *MultiWindowTUI) stopAutoRefresh() {
+	if m.refreshTicker != nil {
+		m.refreshTicker.Stop()
+		m.refreshTicker = nil
+	}
+	select {
+	case <-m.refreshStopCh:
+		// Channel already closed
+	default:
+		close(m.refreshStopCh)
 	}
 }
 
-// RenderVisual loads the entire grid and componnents in the app.
-// this is a blocking functions.
-func RenderVisual(tabs []*v1alpha1.DashboardTab, token string, refreshInterval time.Duration, refreshFunc func() ([]*v1alpha1.DashboardTab, error)) error {
-	app = tview.NewApplication()
-	githubToken = token
-	currentTabs = tabs
-
-	// Render tab in the first row
-	tabsPanel = tview.NewList().ShowSecondaryText(false)
-	setPanelDefaultStyle(tabsPanel.Box)
-	tabsPanel.SetSelectedBackgroundColor(tcell.ColorBlue)
-	tabsPanel.SetHighlightFullLine(true)
-	tabsPanel.SetMainTextStyle(tcell.StyleDefault)
-	tabsPanel.SetTitle(formatTitle("Board#Tabs"))
-
-	// Broken tests in the tab
-	brokenPanel.ShowSecondaryText(false).SetDoneFunc(func() { app.SetFocus(tabsPanel) })
-	setPanelDefaultStyle(brokenPanel.Box)
-	brokenPanel.SetTitle(formatTitle("Tests"))
-	brokenPanel.SetSelectedBackgroundColor(tcell.ColorBlue)
-	brokenPanel.SetHighlightFullLine(true)
-	brokenPanel.SetMainTextStyle(tcell.StyleDefault)
-
-	// Slack Final issue rendering
-	setPanelDefaultStyle(slackPanel.Box)
-	slackPanel.SetTitle(formatTitle("Slack Message"))
-	slackPanel.SetWrap(true).SetDisabled(true)
-	slackPanel.SetTextStyle(tcell.StyleDefault)
-
-	// GitHub panel rendering
-	setPanelDefaultStyle(githubPanel.Box)
-	githubPanel.SetTitle(formatTitle("Github Issue"))
-	githubPanel.SetWrap(true).SetDisabled(true)
-	githubPanel.SetTextStyle(tcell.StyleDefault)
-
-	// Final position bottom panel for information
-	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(defaultPositionText).SetTextStyle(tcell.StyleDefault)
-
-	// Create the grid layout
-	grid := tview.NewGrid().SetRows(10, 10, 0, 0, 1).
-		AddItem(tabsPanel, 0, 0, 1, 2, 0, 0, true).
-		AddItem(brokenPanel, 1, 0, 1, 2, 0, 0, false).
-		AddItem(position, 4, 0, 1, 2, 0, 0, false)
-
-	// Adding middle panel and split across rows and columns
-	grid.AddItem(slackPanel, 2, 0, 2, 1, 0, 0, false).
-		AddItem(githubPanel, 2, 1, 2, 1, 0, 0, false)
-
-	// Initial tabs setup
-	updateTabsPanel(tabs)
-
-	// Set up periodic refresh if interval is configured and refresh function is provided
-	if refreshInterval > 0 && refreshFunc != nil {
-		go func() {
-			ticker := time.NewTicker(refreshInterval)
-			defer ticker.Stop()
-			for range ticker.C {
-				newTabs, err := refreshFunc()
+// refreshBrokenTestsAsync refreshes the broken tests data in a background goroutine
+func (m *MultiWindowTUI) refreshBrokenTestsAsync() {
+	if m.testgridClient == nil || len(m.dashboards) == 0 {
+		return
+	}
+	go func() {
+		var dashboardTabs []*v1alpha1.DashboardTab
+		for _, dashboard := range m.dashboards {
+			dashSummaries, err := m.testgridClient.FetchTabSummary(dashboard, v1alpha1.ERROR_STATUSES)
+			if err != nil {
+				m.updatePositionWithError(fmt.Errorf("error fetching dashboard %s: %v", dashboard, err))
+				continue
+			}
+			for _, dashSummary := range dashSummaries {
+				dashTab, err := m.testgridClient.FetchTabTests(&dashSummary, m.minFailure, m.minFlake)
 				if err != nil {
-					app.QueueUpdateDraw(func() {
-						position.SetText(fmt.Sprintf("[red]Refresh error: %v", err))
-					})
+					tabName := dashboard
+					if dashSummary.DashboardTab != nil {
+						tabName = dashSummary.DashboardTab.TabName
+					}
+					m.updatePositionWithError(fmt.Errorf("error fetching table %s: %v", tabName, err))
 					continue
 				}
-				app.QueueUpdateDraw(func() {
-					updateTabsPanel(newTabs)
-					position.SetText(fmt.Sprintf("[green]Refreshed at %s", time.Now().Format("15:04:05")))
-					// Clear refresh message after 1 seconds
-					go func() {
-						time.Sleep(1 * time.Second)
-						app.QueueUpdateDraw(func() {
-							position.SetText(defaultPositionText)
+				if len(dashTab.TestRuns) > 0 {
+					dashboardTabs = append(dashboardTabs, dashTab)
+				}
+			}
+		}
+		m.updateBrokenTestsUI(dashboardTabs)
+	}()
+}
+
+// updateBrokenTestsUI updates the UI with new tabs data
+func (m *MultiWindowTUI) updateBrokenTestsUI(newTabs []*v1alpha1.DashboardTab) {
+	m.app.QueueUpdateDraw(func() {
+		// Update tabs data
+		m.tabs = newTabs
+
+		// Clear and rebuild tabs panel
+		if m.tabsPanelRef != nil {
+			m.tabsPanelRef.Clear()
+			for _, tab := range m.tabs {
+				icon := "🟣"
+				if tab.TabState == v1alpha1.FAILING_STATUS {
+					icon = "🔴"
+				}
+				tabCopy := tab // Capture for closure
+				m.tabsPanelRef.AddItem(fmt.Sprintf("[%s] %s", icon, strings.ReplaceAll(tab.BoardHash, "#", " - ")), "", 0, func() {
+					if m.brokenPanelRef != nil {
+						m.brokenPanelRef.Clear()
+						for _, test := range tabCopy.TestRuns {
+							m.brokenPanelRef.AddItem(test.TestName, "", 0, nil)
+						}
+						m.app.SetFocus(m.brokenPanelRef)
+						m.brokenPanelRef.SetCurrentItem(0)
+						m.brokenPanelRef.SetChangedFunc(func(i int, testName string, t string, s rune) {
+							if m.positionRef != nil {
+								m.positionRef.SetText(fmt.Sprintf("[blue] selected %s test ", testName))
+							}
 						})
-					}()
+						// Broken panel rendering the function selection
+						m.brokenPanelRef.SetSelectedFunc(func(i int, testName string, t string, s rune) {
+							var currentTest = tabCopy.TestRuns[i]
+							if m.slackPanelRef != nil && m.githubPanelRef != nil && m.positionRef != nil {
+								m.updateSlackPanel(m.slackPanelRef, tabCopy, &currentTest, m.positionRef)
+								m.updateGitHubPanel(m.githubPanelRef, tabCopy, &currentTest, m.positionRef)
+								m.app.SetFocus(m.slackPanelRef)
+							}
+						})
+						if m.positionRef != nil {
+							m.positionRef.SetText(fmt.Sprintf("[blue] selected %s board", tab.TabName))
+						}
+					}
 				})
 			}
-		}()
+			// Update position message
+			if m.positionRef != nil {
+				m.positionRef.SetText(fmt.Sprintf("[green]Auto-refreshed: %d tabs loaded", len(m.tabs)))
+			}
+		}
+	})
+}
+
+// updatePositionWithError updates the position panel with an error message
+func (m *MultiWindowTUI) updatePositionWithError(err error) {
+	if m.positionRef != nil {
+		m.app.QueueUpdateDraw(func() {
+			m.positionRef.SetText(fmt.Sprintf("[red]Refresh error: %v", err))
+		})
+	}
+}
+
+// setupPanelNavigation sets up keyboard navigation between panels
+func (m *MultiWindowTUI) setupPanelNavigation() {
+	// Board#Tabs panel navigation
+	m.tabsPanelRef.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyDown, tcell.KeyUp:
+			// Allow normal list navigation
+			return event
+		}
+		return event
+	})
+
+	// Tests panel navigation
+	m.brokenPanelRef.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEscape:
+			// Go back to Board#Tabs
+			m.app.SetFocus(m.tabsPanelRef)
+			return nil
+		case tcell.KeyDown, tcell.KeyUp:
+			// Allow normal list navigation
+			return event
+		case tcell.KeyTab:
+			// Move to Slack panel
+			m.app.SetFocus(m.slackPanelRef)
+			return nil
+		}
+		return event
+	})
+}
+
+// createMCPIssuesView creates the MCP issues view
+func (m *MultiWindowTUI) createMCPIssuesView() *tview.Flex {
+	// MCP panel rendering
+	mcpPanel := tview.NewTextArea()
+	setPanelDefaultStyle(mcpPanel.Box)
+	mcpPanel.SetTitle(formatTitle("MCP Issues"))
+	mcpPanel.SetWrap(true).SetDisabled(false)
+
+	// Status panel
+	statusPanel := tview.NewTextView()
+	setPanelDefaultStyle(statusPanel.Box)
+	statusPanel.SetTitle(formatTitle("Status"))
+	statusPanel.SetDynamicColors(true)
+	statusPanel.SetText("[yellow]Loading issues from MCP server...")
+
+	// Help panel
+	helpPanel := tview.NewTextView()
+	var helpText = "[yellow]Press [blue]F-1 [yellow]for Broken Tests, [blue]F-2 [yellow]for MCP Issues, [blue]Ctrl-C [yellow]to exit"
+	helpPanel.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(helpText)
+
+	// Store mcpPanel reference for async updates
+	m.mcpPanelRef = mcpPanel
+	m.statusPanelRef = statusPanel
+
+	// Create layout
+	flex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(statusPanel, 3, 0, false).
+		AddItem(mcpPanel, 0, 1, true).
+		AddItem(helpPanel, 1, 0, false)
+
+	m.loadGithubIssuesAsync()
+	return flex
+}
+func initMCPConfig() (endpoint, apiKey string) {
+	endpoint = os.Getenv("MCP_SERVER_ENDPOINT")
+	if endpoint == "" {
+		endpoint = defaultMCPEndpoint
 	}
 
-	// Render the final page.
-	pages = tview.NewPages().AddPage(pagesName, grid, true, true)
-	return app.SetRoot(pages, true).EnableMouse(true).Run()
+	apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("SIGNALHOUND_ANTHROPIC_API_KEY")
+	}
+	return endpoint, apiKey
+}
+
+// updateUIWithError updates UI components with the given error
+func (m *MultiWindowTUI) updateUIWithError(err error) {
+	m.app.QueueUpdateDraw(func() {
+		errMsg := fmt.Sprintf(errorMsgFormat, err)
+		if m.mcpPanelRef != nil {
+			m.mcpPanelRef.SetText(errMsg, false)
+		}
+		if m.statusPanelRef != nil {
+			m.statusPanelRef.SetText(fmt.Sprintf("[red]Error: %v", err))
+		}
+	})
+}
+
+// updateUIWithSuccess updates UI components with successful response
+func (m *MultiWindowTUI) updateUIWithSuccess(response string) {
+	m.app.QueueUpdateDraw(func() {
+		if m.mcpPanelRef != nil {
+			m.mcpPanelRef.SetText(response, false)
+		}
+		if m.statusPanelRef != nil {
+			m.statusPanelRef.SetText(successMsg)
+		}
+	})
+}
+
+// loadGithubIssuesAsync loads GitHub issues in a background goroutine
+func (m *MultiWindowTUI) loadGithubIssuesAsync() {
+	mcpEndpoint, anthropicAPIKey := initMCPConfig()
+	go func() {
+		for i := 0; i < 3; i++ {
+			time.Sleep(10 * time.Second)
+			client, err := intmcp.NewMCPClient(anthropicAPIKey, mcpEndpoint)
+			if err != nil {
+				m.updateUIWithError(err)
+				return
+			}
+			response, err := client.LoadGithubIssues(m.tabs)
+			if err != nil {
+				m.updateUIWithError(err)
+				return
+			}
+			m.updateUIWithSuccess(response)
+			return
+		}
+	}()
 }
 
 // updateSlackPanel writes down to left panel (Slack) content.
-func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResult) {
+func (m *MultiWindowTUI) updateSlackPanel(slackPanel *tview.TextArea, tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResult, position *tview.TextView) {
 	// set the item string with current test content
 	item := fmt.Sprintf("%s %s on [%s](%s): `%s` [Prow](%s), [Triage](%s), last failure on %s\n",
 		tab.StateIcon, cases.Title(language.English).String(tab.TabState), tab.BoardHash, tab.TabURL,
 		currentTest.TestName, currentTest.ProwJobURL, currentTest.TriageURL, timeClean(currentTest.LatestTimestamp),
 	)
 
-	// set input capture, ctrl-space for clipboard copy, esc to cancel panel selection.
+	// set input capture, ctrl-space for clipboard copy
 	slackPanel.SetText(item, true)
+	// Set up navigation and actions for Slack panel
 	slackPanel.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyCtrlSpace {
 			position.SetText("[blue]COPIED [yellow]SLACK [blue]TO THE CLIPBOARD!")
@@ -261,30 +495,29 @@ func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResu
 				return event
 			}
 			setPanelFocusStyle(slackPanel.Box)
-			slackPanel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
 			go func() {
 				time.Sleep(1 * time.Second)
-				app.QueueUpdateDraw(func() {
-					app.SetFocus(brokenPanel)
+				m.app.QueueUpdateDraw(func() {
 					setPanelDefaultStyle(slackPanel.Box)
-					slackPanel.SetTextStyle(tcell.StyleDefault)
 				})
 			}()
+			return nil
 		}
-		if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyUp {
-			slackPanel.SetText("", false)
-			githubPanel.SetText("", false)
-			app.SetFocus(brokenPanel)
-		}
-		if event.Key() == tcell.KeyRight {
-			app.SetFocus(githubPanel)
+		// Navigation
+		switch event.Key() {
+		case tcell.KeyRight:
+			m.app.SetFocus(m.githubPanelRef)
+			return nil
+		case tcell.KeyLeft, tcell.KeyUp, tcell.KeyEscape:
+			m.app.SetFocus(m.brokenPanelRef)
+			return nil
 		}
 		return event
 	})
 }
 
 // updateGitHubPanel writes down to the right panel (GitHub) content.
-func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResult, token string) {
+func (m *MultiWindowTUI) updateGitHubPanel(githubPanel *tview.TextArea, tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResult, position *tview.TextView) {
 	// create the filled-out issue template object
 	splitBoard := strings.Split(tab.BoardHash, "#")
 	issue := &IssueTemplate{
@@ -323,18 +556,16 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 				return event
 			}
 			setPanelFocusStyle(githubPanel.Box)
-			githubPanel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
 			go func() {
 				time.Sleep(1 * time.Second)
-				app.QueueUpdateDraw(func() {
-					app.SetFocus(brokenPanel)
+				m.app.QueueUpdateDraw(func() {
 					setPanelDefaultStyle(githubPanel.Box)
-					githubPanel.SetTextStyle(tcell.StyleDefault)
 				})
 			}()
+			return nil
 		}
 		if event.Key() == tcell.KeyCtrlB {
-			gh := github.NewProjectManager(context.Background(), token)
+			gh := github.NewProjectManager(context.Background(), m.githubToken)
 			if err := gh.CreateDraftIssue(issueTitle, issueBody, tab.BoardHash); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
 				return event
@@ -342,22 +573,21 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 			position.SetText("[blue]Created [yellow]DRAFT ISSUE [blue] on GitHub Project!")
 			setPanelFocusStyle(githubPanel.Box)
 			go func() {
-				app.QueueUpdateDraw(func() {
-					app.SetFocus(brokenPanel)
+				time.Sleep(1 * time.Second)
+				m.app.QueueUpdateDraw(func() {
 					setPanelDefaultStyle(githubPanel.Box)
 				})
 			}()
+			return nil
 		}
-		if event.Key() == tcell.KeyEscape {
-			slackPanel.SetText("", false)
-			githubPanel.SetText("", false)
-			app.SetFocus(brokenPanel)
-		}
-		if event.Key() == tcell.KeyLeft {
-			app.SetFocus(slackPanel)
-		}
-		if event.Key() == tcell.KeyRight {
-			app.SetFocus(slackPanel)
+		// Navigation
+		switch event.Key() {
+		case tcell.KeyLeft:
+			m.app.SetFocus(m.slackPanelRef)
+			return nil
+		case tcell.KeyUp, tcell.KeyEscape:
+			m.app.SetFocus(m.brokenPanelRef)
+			return nil
 		}
 		return event
 	})
@@ -375,8 +605,8 @@ func CopyToClipboard(text string) error {
 	switch runtime.GOOS {
 	case "windows":
 		// Native Windows
-		cmd = exec.Command("cmd", "/c", "echo "+text+" | clip")
-		// Alternative: cmd = exec.Command("powershell", "-command", "Set-Clipboard", "-Value", text)
+		cmd = exec.Command("clip.exe")
+		cmd.Stdin = strings.NewReader(text)
 	case "darwin":
 		// macOS
 		cmd = exec.Command("pbcopy")
