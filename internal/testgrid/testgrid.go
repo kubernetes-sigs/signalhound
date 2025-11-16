@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/knabben/signalhound/api/v1alpha1"
-	"github.com/knabben/signalhound/internal/prow"
+	"sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/prow"
 )
 
 var (

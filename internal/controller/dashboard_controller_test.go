@@ -27,7 +27,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	testgridv1alpha1 "github.com/knabben/signalhound/api/v1alpha1"
+	testgridv1alpha1 "sigs.k8s.io/signalhound/api/v1alpha1"
 )
 
 var _ = Describe("Dashboard Controller", func() {

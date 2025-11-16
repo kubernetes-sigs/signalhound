@@ -25,8 +25,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	testgridv1alpha1 "github.com/knabben/signalhound/api/v1alpha1"
-	"github.com/knabben/signalhound/internal/testgrid"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +32,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	testgridv1alpha1 "sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/testgrid"
 )
 
 // DashboardReconciler reconciles a Dashboard object

@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/knabben/signalhound/api/v1alpha1"
-	"github.com/knabben/signalhound/internal/github"
 	"github.com/rivo/tview"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
+	"sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/github"
 )
 
 var (

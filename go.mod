@@ -1,4 +1,4 @@
-module github.com/knabben/signalhound
+module sigs.k8s.io/signalhound
 
 go 1.25.1
 
