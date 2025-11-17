@@ -16,14 +16,21 @@ import (
 	"sigs.k8s.io/signalhound/internal/github"
 )
 
+const defaultPositionText = "[yellow]Select a content Windows and press [blue]Ctrl-Space [yellow]to COPY or press [blue]Ctrl-C [yellow]to exit"
+
 var (
-	pagesName   = "SignalHound"
-	app         *tview.Application // The tview application.
-	pages       *tview.Pages       // The application pages.
-	brokenPanel = tview.NewList()
-	slackPanel  = tview.NewTextArea()
-	githubPanel = tview.NewTextArea()
-	position    = tview.NewTextView()
+	pagesName         = "SignalHound"
+	app               *tview.Application // The tview application.
+	pages             *tview.Pages       // The application pages.
+	tabsPanel         *tview.List        // The tabs panel (needs to be accessible for updates)
+	brokenPanel       = tview.NewList()
+	slackPanel        = tview.NewTextArea()
+	githubPanel       = tview.NewTextArea()
+	position          = tview.NewTextView()
+	currentTabs       []*v1alpha1.DashboardTab // Store current tabs for refresh
+	githubToken       string                   // Store token for refresh
+	selectedBoardHash string                   // Store selected BoardHash for refresh preservation
+	selectedTestName  string                   // Store selected test name for refresh preservation
 )
 
 func formatTitle(txt string) string {
@@ -52,13 +59,115 @@ func setPanelFocusStyle(p *tview.Box) {
 	app.SetFocus(p)
 }
 
+// updateTabsPanel updates the tabs panel with new data while preserving selection if possible.
+func updateTabsPanel(tabs []*v1alpha1.DashboardTab) {
+	if tabsPanel == nil {
+		return
+	}
+
+	// Store current selection before clearing
+	if tabsPanel.GetItemCount() > 0 {
+		currentIndex := tabsPanel.GetCurrentItem()
+		if currentIndex >= 0 && currentIndex < len(currentTabs) {
+			selectedBoardHash = currentTabs[currentIndex].BoardHash
+			// Store selected test name if brokenPanel has items
+			if brokenPanel.GetItemCount() > 0 {
+				testIndex := brokenPanel.GetCurrentItem()
+				if testIndex >= 0 && testIndex < brokenPanel.GetItemCount() {
+					_, selectedTestName = brokenPanel.GetItemText(testIndex)
+				}
+			}
+		}
+	}
+
+	// Clear and rebuild the tabs panel
+	tabsPanel.Clear()
+	// Map to store tab selection callbacks by BoardHash for restoration
+	tabCallbacks := make(map[string]func())
+
+	for _, tab := range tabs {
+		icon := "🟣"
+		if tab.TabState == v1alpha1.FAILING_STATUS {
+			icon = "🔴"
+		}
+		tabText := fmt.Sprintf("[%s] %s", icon, strings.ReplaceAll(tab.BoardHash, "#", " - "))
+
+		// Create selection callback for this tab
+		tabCallback := func(tab *v1alpha1.DashboardTab) func() {
+			return func() {
+				// Store the selected BoardHash when user manually selects a tab
+				selectedBoardHash = tab.BoardHash
+				selectedTestName = "" // Clear test selection when tab changes
+
+				brokenPanel.Clear()
+				for _, test := range tab.TestRuns {
+					brokenPanel.AddItem(test.TestName, "", 0, nil)
+				}
+				app.SetFocus(brokenPanel)
+				brokenPanel.SetCurrentItem(0)
+				brokenPanel.SetChangedFunc(func(i int, testName string, secondaryText string, shortcut rune) {
+					position.SetText(defaultPositionText)
+					// Store the selected test name when user navigates tests
+					if i >= 0 && i < brokenPanel.GetItemCount() {
+						_, selectedTestName = brokenPanel.GetItemText(i)
+					}
+				})
+				// Broken panel rendering the function selection
+				brokenPanel.SetSelectedFunc(func(i int, testName string, secondaryText string, shortcut rune) {
+					// Store the selected test name
+					selectedTestName = testName
+					var currentTest = tab.TestRuns[i]
+					updateSlackPanel(tab, &currentTest)
+					updateGitHubPanel(tab, &currentTest, githubToken)
+					app.SetFocus(slackPanel)
+				})
+			}
+		}(tab)
+
+		tabCallbacks[tab.BoardHash] = tabCallback
+		tabsPanel.AddItem(tabText, "", 0, tabCallback)
+	}
+
+	// Update stored tabs
+	currentTabs = tabs
+
+	// Try to restore selection by BoardHash
+	if selectedBoardHash != "" {
+		for i, tab := range tabs {
+			if tab.BoardHash == selectedBoardHash {
+				tabsPanel.SetCurrentItem(i)
+				// Save test selection before callback clears it
+				savedTestName := selectedTestName
+				// Trigger the selection callback to restore brokenPanel
+				if callback, exists := tabCallbacks[selectedBoardHash]; exists {
+					callback()
+					// Restore test selection if it exists
+					if savedTestName != "" {
+						for j := 0; j < brokenPanel.GetItemCount(); j++ {
+							testName, _ := brokenPanel.GetItemText(j)
+							if testName == savedTestName {
+								brokenPanel.SetCurrentItem(j)
+								selectedTestName = savedTestName // Restore the stored value
+								break
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+}
+
 // RenderVisual loads the entire grid and componnents in the app.
 // this is a blocking functions.
-func RenderVisual(tabs []*v1alpha1.DashboardTab, githubToken string) error {
+func RenderVisual(tabs []*v1alpha1.DashboardTab, token string, refreshInterval time.Duration, refreshFunc func() ([]*v1alpha1.DashboardTab, error)) error {
 	app = tview.NewApplication()
+	githubToken = token
+	currentTabs = tabs
 
 	// Render tab in the first row
-	tabsPanel := tview.NewList().ShowSecondaryText(false)
+	tabsPanel = tview.NewList().ShowSecondaryText(false)
 	setPanelDefaultStyle(tabsPanel.Box)
 	tabsPanel.SetTitle(formatTitle("Board#Tabs"))
 
@@ -78,8 +187,7 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, githubToken string) error {
 	githubPanel.SetWrap(true)
 
 	// Final position bottom panel for information
-	var positionText = "[yellow]Select a content Windows and press [blue]Ctrl-Space [yellow]to COPY or press [blue]Ctrl-C [yellow]to exit"
-	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(positionText)
+	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(defaultPositionText)
 
 	// Create the grid layout
 	grid := tview.NewGrid().SetRows(10, 10, 0, 0, 1).
@@ -91,30 +199,35 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, githubToken string) error {
 	grid.AddItem(slackPanel, 2, 0, 2, 1, 0, 0, false).
 		AddItem(githubPanel, 2, 1, 2, 1, 0, 0, false)
 
-	// Tabs iteration for building the middle panels and actions settings
-	for _, tab := range tabs {
-		icon := "🟣"
-		if tab.TabState == v1alpha1.FAILING_STATUS {
-			icon = "🔴"
-		}
-		tabsPanel.AddItem(fmt.Sprintf("[%s] %s", icon, strings.ReplaceAll(tab.BoardHash, "#", " - ")), "", 0, func() {
-			brokenPanel.Clear()
-			for _, test := range tab.TestRuns {
-				brokenPanel.AddItem(test.TestName, "", 0, nil)
+	// Initial tabs setup
+	updateTabsPanel(tabs)
+
+	// Set up periodic refresh if interval is configured and refresh function is provided
+	if refreshInterval > 0 && refreshFunc != nil {
+		go func() {
+			ticker := time.NewTicker(refreshInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				newTabs, err := refreshFunc()
+				if err != nil {
+					app.QueueUpdateDraw(func() {
+						position.SetText(fmt.Sprintf("[red]Refresh error: %v", err))
+					})
+					continue
+				}
+				app.QueueUpdateDraw(func() {
+					updateTabsPanel(newTabs)
+					position.SetText(fmt.Sprintf("[green]Refreshed at %s", time.Now().Format("15:04:05")))
+					// Clear refresh message after 1 seconds
+					go func() {
+						time.Sleep(1 * time.Second)
+						app.QueueUpdateDraw(func() {
+							position.SetText(defaultPositionText)
+						})
+					}()
+				})
 			}
-			app.SetFocus(brokenPanel)
-			brokenPanel.SetCurrentItem(0)
-			brokenPanel.SetChangedFunc(func(i int, testName string, t string, s rune) {
-				position.SetText(positionText)
-			})
-			// Broken panel rendering the function selection
-			brokenPanel.SetSelectedFunc(func(i int, testName string, t string, s rune) {
-				var currentTest = tab.TestRuns[i]
-				updateSlackPanel(tab, &currentTest)
-				updateGitHubPanel(tab, &currentTest, githubToken)
-				app.SetFocus(slackPanel)
-			})
-		})
+		}()
 	}
 
 	// Render the final page.
@@ -141,7 +254,6 @@ func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResu
 			}
 			setPanelFocusStyle(slackPanel.Box)
 			go func() {
-				time.Sleep(1 * time.Second)
 				app.QueueUpdateDraw(func() {
 					app.SetFocus(brokenPanel)
 					setPanelDefaultStyle(slackPanel.Box)
@@ -217,7 +329,6 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 			position.SetText("[blue]Created [yellow]DRAFT ISSUE [blue] on GitHub Project!")
 			setPanelFocusStyle(githubPanel.Box)
 			go func() {
-				time.Sleep(1 * time.Second)
 				app.QueueUpdateDraw(func() {
 					app.SetFocus(brokenPanel)
 					setPanelDefaultStyle(githubPanel.Box)

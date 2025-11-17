@@ -29,6 +29,8 @@ Configure with a Personal Access Token (PAT) with appropriate repository permiss
 Press Ctrl-Space on any panel to copy content to clipboard
 Currently optimized for WSL2 environments
 
+## Usage
+
 ## Installation and Build
 
 Prerequisites
@@ -64,6 +66,30 @@ cd signalhound
 make run  # for abstract and standalone
 make run-controller # for running the controller outside the cluster
 ```
+
+### Abstract Command Flags
+
+The `abstract` command supports the following flags to customize test monitoring behavior:
+
+#### `--min-failure` / `-f`
+- **Type**: Integer
+- **Default**: `2`
+- **Description**: Minimum threshold for test failures. Only tests with at least this many failures will be displayed in the TUI.
+- **Example**: `signalhound abstract --min-failure 3`
+
+#### `--min-flake` / `-m`
+- **Type**: Integer
+- **Default**: `3`
+- **Description**: Minimum threshold for test flakeness. Only tests with at least this many flake occurrences will be displayed in the TUI.
+- **Example**: `signalhound abstract --min-flake 5`
+
+#### `--refresh-interval` / `-r`
+- **Type**: Integer (seconds)
+- **Default**: `0` (disabled)
+- **Description**: Automatically refresh the dashboard tabs list by calling `FetchTabSummary` at the specified interval. When enabled, the TUI will periodically update the list of failing/flaking tests without losing your current context (e.g., if you're editing a GitHub issue, your work won't be lost). Set to `0` to disable auto-refresh.
+- **Example**: `signalhound abstract --refresh-interval 10` (refreshes every 10 seconds)
+
+**Note**: When auto-refresh is enabled, the position panel will show a refresh timestamp when new data is loaded. The refresh only updates the tabs list, preserving your current selection and any open panels.
 
 ### To Deploy on the cluster
 
