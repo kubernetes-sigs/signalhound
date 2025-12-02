@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/signalhound/internal/github"
 )
 
-const defaultPositionText = "[yellow]Select a content Windows and press [blue]Ctrl-Space [yellow]to COPY or press [blue]Ctrl-C [yellow]to exit"
+const defaultPositionText = "[green]Select a content Windows and press [blue]Ctrl-Space [green]to COPY or press [blue]Ctrl-C [green]to exit"
 
 var (
 	pagesName         = "SignalHound"
@@ -169,25 +169,33 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, token string, refreshInterval t
 	// Render tab in the first row
 	tabsPanel = tview.NewList().ShowSecondaryText(false)
 	setPanelDefaultStyle(tabsPanel.Box)
+	tabsPanel.SetSelectedBackgroundColor(tcell.ColorBlue)
+	tabsPanel.SetHighlightFullLine(true)
+	tabsPanel.SetMainTextStyle(tcell.StyleDefault)
 	tabsPanel.SetTitle(formatTitle("Board#Tabs"))
 
 	// Broken tests in the tab
 	brokenPanel.ShowSecondaryText(false).SetDoneFunc(func() { app.SetFocus(tabsPanel) })
 	setPanelDefaultStyle(brokenPanel.Box)
 	brokenPanel.SetTitle(formatTitle("Tests"))
+	brokenPanel.SetSelectedBackgroundColor(tcell.ColorBlue)
+	brokenPanel.SetHighlightFullLine(true)
+	brokenPanel.SetMainTextStyle(tcell.StyleDefault)
 
 	// Slack Final issue rendering
 	setPanelDefaultStyle(slackPanel.Box)
 	slackPanel.SetTitle(formatTitle("Slack Message"))
 	slackPanel.SetWrap(true).SetDisabled(true)
+	slackPanel.SetTextStyle(tcell.StyleDefault)
 
 	// GitHub panel rendering
 	setPanelDefaultStyle(githubPanel.Box)
 	githubPanel.SetTitle(formatTitle("Github Issue"))
-	githubPanel.SetWrap(true)
+	githubPanel.SetWrap(true).SetDisabled(true)
+	githubPanel.SetTextStyle(tcell.StyleDefault)
 
 	// Final position bottom panel for information
-	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(defaultPositionText)
+	position.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).SetText(defaultPositionText).SetTextStyle(tcell.StyleDefault)
 
 	// Create the grid layout
 	grid := tview.NewGrid().SetRows(10, 10, 0, 0, 1).
@@ -253,10 +261,13 @@ func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResu
 				return event
 			}
 			setPanelFocusStyle(slackPanel.Box)
+			slackPanel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
 			go func() {
+				time.Sleep(1 * time.Second)
 				app.QueueUpdateDraw(func() {
 					app.SetFocus(brokenPanel)
 					setPanelDefaultStyle(slackPanel.Box)
+					slackPanel.SetTextStyle(tcell.StyleDefault)
 				})
 			}()
 		}
@@ -312,11 +323,13 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 				return event
 			}
 			setPanelFocusStyle(githubPanel.Box)
+			githubPanel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
 			go func() {
 				time.Sleep(1 * time.Second)
 				app.QueueUpdateDraw(func() {
 					app.SetFocus(brokenPanel)
 					setPanelDefaultStyle(githubPanel.Box)
+					githubPanel.SetTextStyle(tcell.StyleDefault)
 				})
 			}()
 		}
