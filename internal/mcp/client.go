@@ -15,9 +15,14 @@ const templatePrompt = `You are analyzing a list of currently failing and flaky 
 
 Your task is to:
 1. Review the list of currently failing and flaky tests
-2. Review the existing GitHub issues
-3. Identify which failing AND flake tests does NOT have a corresponding GitHub issue created yet
-4. For each MISSING issue, provide a brief summary of what test is failing and why it needs an issue
+2. Review the existing GitHub issues, paying special attention to:
+   - Issues from the SAME board/tab (BoardHash) as the failing test
+   - Issues that might cover the same test or related tests in the same category
+   - Issues that mention similar test names, SIGs, or error patterns
+3. For each failing/flaky test, determine if it is:
+   a) ALREADY COVERED: An existing issue on the same board/tab likely covers this test (same test name, similar test pattern, same SIG, or broader category issue)
+   b) MISSING: No existing issue covers this test
+4. Report both categories clearly
 
 Currently Failing and Flaky Tests:
 %s
@@ -25,10 +30,41 @@ Currently Failing and Flaky Tests:
 Existing GitHub Issues:
 %s
 
-Please provide:
-1. A list of tests that are failing but don't have corresponding GitHub issues.
-2. A brief summary table missing tests.
-3. Sort them by status and name`
+Please provide your analysis in the following format, only showing the MISSING items:
+
+## Tests Missing Issues
+
+For each test that does NOT have a corresponding issue:
+- Test name and board/tab
+- Brief summary of what test is failing and why it needs an issue
+
+Sort by: Status then Test name
+
+IMPORTANT: When determining if a test is "COVERED", be liberal in your interpretation:
+
+1. **Board/Tab Matching**: 
+   - Extract board/tab information from issue titles and bodies (look for patterns like "sig-release-master-blocking", "board#tab", or similar board names)
+   - If an issue mentions the same board/tab (BoardHash) as a failing test, it's likely related
+   - Board names can appear in various formats: "sig-release-master-blocking", "sig-release-master-informing", etc.
+
+2. **Test Name Matching**:
+   - Exact test name match = COVERED
+   - Similar test name (same prefix, same SIG) = COVERED
+   - Test mentioned in a broader category issue = COVERED
+
+3. **SIG Matching**:
+   - If an issue exists for the same board/tab with the same SIG, consider tests from that SIG potentially covered
+   - Look for SIG mentions in issue titles/bodies (e.g., "[sig-node]", "SIG Node", etc.)
+
+4. **Broader Coverage**:
+   - If an issue exists for the same board/tab and covers a broader category (e.g., "multiple tests failing", "job failing", "tab failing"), consider related tests covered
+   - Issues that mention the board/tab but not specific tests may still cover all tests in that board/tab
+
+5. **When to mark as MISSING**:
+   - Only mark as MISSING if you're confident no existing issue on the same board/tab could reasonably cover it
+   - If unsure, prefer marking as COVERED to avoid duplicate issues
+
+**Example**: If a test "TestA" is failing on board "sig-release-master-blocking#gce-cos-master-default" and there's an issue titled "[Failing Test] sig-release-master-blocking#gce-cos-master-default - multiple tests failing", then TestA should be marked as COVERED even if it's not explicitly mentioned.`
 
 type MCPClient struct {
 	ctx context.Context
@@ -96,16 +132,27 @@ func (m *MCPClient) LoadGithubIssues(tabs []*v1alpha1.DashboardTab) (string, err
 		}
 	}
 
-	// Build a list of failing tests for comparison
+	// Build a list of failing tests for comparison with clear board/tab grouping
 	var brokenTestsList strings.Builder
 	brokenTestsList.WriteString("=== Currently Failing or Flaking Tests ===\n\n")
 	for _, tab := range failingTabs {
-		brokenTestsList.WriteString(fmt.Sprintf("Board: %s (%s)\n", tab.BoardHash, tab.TabName))
+		// Extract board name and tab name from BoardHash (format: "board#tab")
+		boardParts := strings.Split(tab.BoardHash, "#")
+		boardName := boardParts[0]
+		tabName := ""
+		if len(boardParts) > 1 {
+			tabName = boardParts[1]
+		}
+
+		brokenTestsList.WriteString(fmt.Sprintf("Board/Tab: %s (BoardHash: %s)\n", tab.BoardHash, tab.BoardHash))
+		brokenTestsList.WriteString(fmt.Sprintf("  Board Name: %s\n", boardName))
+		if tabName != "" {
+			brokenTestsList.WriteString(fmt.Sprintf("  Tab Name: %s\n", tabName))
+		}
+		brokenTestsList.WriteString(fmt.Sprintf("  Status: %s\n", tab.TabState))
+		brokenTestsList.WriteString("  Tests:\n")
 		for _, test := range tab.TestRuns {
-			brokenTestsList.WriteString(fmt.Sprintf("  - Test: %s, Status: %s\n", test.TestName, tab.TabState))
-			if test.ErrorMessage != "" {
-				brokenTestsList.WriteString(fmt.Sprintf("    Error: %s\n", test.ErrorMessage))
-			}
+			brokenTestsList.WriteString(fmt.Sprintf("    - %s\n", test.TestName))
 		}
 		brokenTestsList.WriteString("\n")
 	}
@@ -129,7 +176,7 @@ func (m *MCPClient) LoadGithubIssues(tabs []*v1alpha1.DashboardTab) (string, err
 	}
 
 	var response string
-	if err == nil && len(message.Content) > 0 {
+	if len(message.Content) > 0 {
 		for _, block := range message.Content {
 			if textBlock, ok := block.AsAny().(anthropic.TextBlock); ok {
 				response += textBlock.Text
@@ -137,7 +184,7 @@ func (m *MCPClient) LoadGithubIssues(tabs []*v1alpha1.DashboardTab) (string, err
 		}
 	} else {
 		// Fallback if Anthropic fails
-		response = fmt.Sprintf("=== Analysis ===\n\nFlake || Failing Tests:\n%s\n\nExisting Issues:\n%s", brokenTestsList.String(), issuesText)
+		_ = fmt.Sprintf("=== Analysis ===\n\nFlake || Failing Tests:\n%s\n\nExisting Issues:\n%s", brokenTestsList.String(), issuesText)
 	}
 
 	return response, nil

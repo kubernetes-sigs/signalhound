@@ -380,7 +380,7 @@ func (g *ProjectManager) GetProjectIssues(perPage int) ([]Issue, error) {
 					// Check if this is the status field with FAILING status
 					if fieldID == fmt.Sprintf("%v", statusFieldID) {
 						optionNameLower := strings.ToLower(optionName)
-						if strings.Contains(optionNameLower, "failing") {
+						if strings.Contains(optionNameLower, "failing") || strings.Contains(optionNameLower, "flaky") {
 							matchesStatus = true
 						}
 					}
