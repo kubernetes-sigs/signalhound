@@ -2,7 +2,9 @@
   "name": "Kubebuilder DevContainer",
   "image": "docker.io/golang:1.24-bookworm",
   "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": false
+    },
     "ghcr.io/devcontainers/features/git:1": {}
   },
 
