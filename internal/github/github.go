@@ -20,6 +20,7 @@ const (
 type ProjectManagerInterface interface {
 	GetProjectFields() ([]ProjectFieldInfo, error)
 	CreateDraftIssue(title, body, board string) error
+	GetProjectIssues(perPage int) ([]Issue, error)
 }
 
 // ProjectManager represents a GitHub organization with a global workflow file and reference
@@ -42,6 +43,23 @@ type ProjectFieldInfo struct {
 	ID      g4.ID
 	Name    g4.String
 	Options map[string]interface{} // option name -> option ID
+}
+
+// Project represents a GitHub project
+type Project struct {
+	Name    *string
+	Body    *string
+	State   *string
+	HTMLURL *string
+}
+
+// Issue represents a GitHub issue on a project board
+type Issue struct {
+	Number  int
+	Title   string
+	Body    string
+	State   string
+	HTMLURL string
 }
 
 // NewProjectManager creates a new ProjectManager
@@ -145,28 +163,17 @@ func (g *ProjectManager) CreateDraftIssue(title, body, board string) error {
 	var k8sReleaseFieldID, viewFieldID, statusFieldID, boardFieldID g4.ID
 	var k8sReleaseValueID, viewValueID, statusValueID, boardValueID g4.ID
 
+	// Use helper function to find k8s_release field and latest version
+	k8sReleaseFieldID, k8sReleaseValueID = findK8sReleaseFieldAndLatestVersion(fields)
+
+	// Use helper function to find status field with "drafting" or "draft" option
+	statusFieldID, statusValueID = findStatusFieldAndOption(fields, func(optName string) bool {
+		optNameLower := strings.ToLower(optName)
+		return strings.Contains(optNameLower, "drafting") || strings.Contains(optNameLower, "draft")
+	})
+
 	for _, field := range fields {
 		fieldNameLower := strings.ToLower(string(field.Name))
-
-		// find K8s Release field - look for fields containing "k8s", "release", or "version"
-		if strings.Contains(fieldNameLower, "k8s release") {
-			k8sReleaseFieldID = field.ID
-			// find the latest version option (highest version number)
-			latestVersion := ""
-			latestVersionID := g4.ID("")
-			for optName, optID := range field.Options {
-				// extract version number from option name (e.g., "v1.32" -> "1.32")
-				if version := extractVersion(optName); version != "" {
-					if latestVersion == "" || compareVersions(version, latestVersion) > 0 {
-						latestVersion = version
-						latestVersionID = optID
-					}
-				}
-			}
-			if latestVersionID != g4.ID("") {
-				k8sReleaseValueID = latestVersionID
-			}
-		}
 
 		// find view field - look for fields containing "view"
 		if strings.Contains(fieldNameLower, "view") {
@@ -187,18 +194,6 @@ func (g *ProjectManager) CreateDraftIssue(title, body, board string) error {
 			for optName, optID := range field.Options {
 				if strings.Contains(board, strings.ToLower(optName)) {
 					boardValueID = optID
-					break
-				}
-			}
-		}
-
-		// find Status field
-		if strings.Contains(fieldNameLower, "status") {
-			statusFieldID = field.ID
-			for optName, optID := range field.Options {
-				if strings.Contains(strings.ToLower(optName), "drafting") ||
-					strings.Contains(strings.ToLower(optName), "draft") {
-					statusValueID = optID
 					break
 				}
 			}
@@ -258,13 +253,210 @@ func (g *ProjectManager) CreateDraftIssue(title, body, board string) error {
 	return nil
 }
 
-// extractVersion extracts a version string from text (e.g., "v1.32" -> "1.32", "1.30" -> "1.30")
-func extractVersion(text string) string {
-	versionPattern := regexp.MustCompile(`v?(\d+)\.(\d+)`)
-	if matches := versionPattern.FindStringSubmatch(text); len(matches) >= 3 {
-		return fmt.Sprintf("%s.%s", matches[1], matches[2])
+// GetProjectIssues retrieves all issues from the project board
+func (g *ProjectManager) GetProjectIssues(perPage int) ([]Issue, error) {
+	if g.githubClient == nil {
+		return nil, errors.New("github GraphQL client is nil")
 	}
-	return ""
+
+	// Get project fields to find the k8s_release field ID
+	fields, err := g.GetProjectFields()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project fields: %w", err)
+	}
+
+	// Use helper functions to find fields
+	k8sReleaseFieldID, k8sReleaseOptionID := findK8sReleaseFieldAndLatestVersion(fields)
+	statusFieldID, failingStatusOptionID := findStatusFieldAndOption(fields, func(optName string) bool {
+		return strings.Contains(strings.ToLower(optName), "failing") ||
+			strings.Contains(strings.ToLower(optName), "flaky")
+	})
+
+	if k8sReleaseOptionID == "" {
+		return nil, fmt.Errorf("latest version option not found in k8s_release field")
+	}
+
+	if failingStatusOptionID == "" {
+		return nil, fmt.Errorf("FAILING status option not found in status field")
+	}
+
+	// Find the latest version string for comparison
+	var latestVersionStr string
+	for _, field := range fields {
+		fieldNameLower := strings.ToLower(string(field.Name))
+		if strings.Contains(fieldNameLower, "k8s release") && field.ID == k8sReleaseFieldID {
+			for optName, optID := range field.Options {
+				if optID == k8sReleaseOptionID {
+					latestVersionStr = extractVersion(optName)
+					break
+				}
+			}
+			break
+		}
+	}
+
+	issues := make([]Issue, 0)
+	var cursor *g4.String
+	hasNextPage := true
+
+	for hasNextPage {
+		var query struct {
+			Node struct {
+				ProjectV2 struct {
+					Items struct {
+						Nodes []struct {
+							Content struct {
+								Typename string `graphql:"__typename"`
+								Issue    struct {
+									Number g4.Int
+									Title  g4.String
+									Body   g4.String
+									State  g4.IssueState
+									URL    g4.URI
+								} `graphql:"... on Issue"`
+							}
+							FieldValues struct {
+								Nodes []struct {
+									Typename                            string `graphql:"__typename"`
+									ProjectV2ItemFieldSingleSelectValue struct {
+										Field struct {
+											ProjectV2FieldCommon struct {
+												ID   g4.ID
+												Name g4.String
+											} `graphql:"... on ProjectV2FieldCommon"`
+										} `graphql:"field"`
+										Name g4.String
+									} `graphql:"... on ProjectV2ItemFieldSingleSelectValue"`
+								}
+							} `graphql:"fieldValues(first: 20)"`
+						}
+						PageInfo struct {
+							HasNextPage g4.Boolean
+							EndCursor   g4.String
+						}
+					} `graphql:"items(first: $first, after: $after)"`
+				} `graphql:"... on ProjectV2"`
+			} `graphql:"node(id: $projectID)"`
+		}
+
+		// Note: GitHub GraphQL API does NOT support filter parameter for ProjectV2 items
+		// We need to fetch all items and filter them in code by checking fieldValues
+		variables := map[string]interface{}{
+			"projectID": g4.ID(g.projectID),
+			"first":     g4.Int(perPage),
+			"after":     cursor,
+		}
+
+		if err := g.githubClient.Query(context.Background(), &query, variables); err != nil {
+			return nil, fmt.Errorf("failed to query project issues: %w", err)
+		}
+
+		// Filter items by k8s_release field value in code
+		// Since GraphQL API doesn't support filter parameter, we fetch all and filter manually
+		for _, node := range query.Node.ProjectV2.Items.Nodes {
+			// Only process actual issues, not draft issues or pull requests
+			if node.Content.Typename != "Issue" {
+				continue
+			}
+
+			// Check if this item has the matching k8s_release field value and FAILING status
+			matchesVersion := false
+			matchesStatus := false
+
+			for _, fieldValue := range node.FieldValues.Nodes {
+				if fieldValue.Typename == "ProjectV2ItemFieldSingleSelectValue" {
+					fieldID := fmt.Sprintf("%v", fieldValue.ProjectV2ItemFieldSingleSelectValue.Field.ProjectV2FieldCommon.ID)
+					optionName := string(fieldValue.ProjectV2ItemFieldSingleSelectValue.Name)
+
+					// Check if this is the k8s_release field with the latest version
+					if fieldID == fmt.Sprintf("%v", k8sReleaseFieldID) {
+						// Extract version and check if it matches the latest version we found
+						extractedVersion := extractVersion(optionName)
+						if extractedVersion == latestVersionStr {
+							matchesVersion = true
+						}
+					}
+
+					// Check if this is the status field with FAILING status
+					if fieldID == fmt.Sprintf("%v", statusFieldID) {
+						optionNameLower := strings.ToLower(optionName)
+						if strings.Contains(optionNameLower, "failing") || strings.Contains(optionNameLower, "flaky") {
+							matchesStatus = true
+						}
+					}
+				}
+			}
+
+			// Only include issues that match both the version filter and FAILING status
+			if matchesVersion && matchesStatus {
+				issue := Issue{
+					Number:  int(node.Content.Issue.Number),
+					Title:   string(node.Content.Issue.Title),
+					Body:    string(node.Content.Issue.Body),
+					State:   string(node.Content.Issue.State),
+					HTMLURL: node.Content.Issue.URL.String(),
+				}
+				issues = append(issues, issue)
+			}
+		}
+
+		hasNextPage = bool(query.Node.ProjectV2.Items.PageInfo.HasNextPage)
+		if hasNextPage {
+			cursor = &query.Node.ProjectV2.Items.PageInfo.EndCursor
+		}
+	}
+
+	return issues, nil
+}
+
+// findK8sReleaseFieldAndLatestVersion finds the k8s_release field and returns the field ID and latest version option ID
+func findK8sReleaseFieldAndLatestVersion(fields []ProjectFieldInfo) (fieldID g4.ID, optionID g4.ID) {
+	for _, field := range fields {
+		fieldNameLower := strings.ToLower(string(field.Name))
+		if strings.Contains(fieldNameLower, "k8s release") {
+			fieldID = field.ID
+			// find the latest version option (highest version number)
+			latestVersion := ""
+			latestVersionID := g4.ID("")
+			for optName, optID := range field.Options {
+				// extract version number from option name (e.g., "v1.32" -> "1.32")
+				if version := extractVersion(optName); version != "" {
+					if latestVersion == "" || compareVersions(version, latestVersion) > 0 {
+						latestVersion = version
+						if id, ok := optID.(g4.ID); ok {
+							latestVersionID = id
+						}
+					}
+				}
+			}
+			if latestVersionID != g4.ID("") {
+				optionID = latestVersionID
+			}
+			break
+		}
+	}
+	return
+}
+
+// findStatusFieldAndOption finds the status field and returns the field ID and option ID matching the criteria
+func findStatusFieldAndOption(fields []ProjectFieldInfo, optionMatcher func(string) bool) (fieldID g4.ID, optionID g4.ID) {
+	for _, field := range fields {
+		fieldNameLower := strings.ToLower(string(field.Name))
+		if strings.Contains(fieldNameLower, "status") {
+			fieldID = field.ID
+			// Find the option that matches the criteria
+			for optName, optID := range field.Options {
+				if optionMatcher(optName) {
+					if id, ok := optID.(g4.ID); ok {
+						optionID = id
+						break
+					}
+				}
+			}
+			break
+		}
+	}
+	return
 }
 
 // compareVersions compares two version strings (e.g., "1.30", "1.31")
@@ -296,4 +488,13 @@ func compareVersions(v1, v2 string) int {
 	}
 
 	return 0
+}
+
+// extractVersion extracts a version string from text (e.g., "v1.32" -> "1.32", "1.30" -> "1.30")
+func extractVersion(text string) string {
+	versionPattern := regexp.MustCompile(`v?(\d+)\.(\d+)`)
+	if matches := versionPattern.FindStringSubmatch(text); len(matches) >= 3 {
+		return fmt.Sprintf("%s.%s", matches[1], matches[2])
+	}
+	return ""
 }

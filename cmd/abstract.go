@@ -3,16 +3,20 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
-
 	"sigs.k8s.io/signalhound/api/v1alpha1"
+	"sigs.k8s.io/signalhound/internal/mcp"
 	"sigs.k8s.io/signalhound/internal/testgrid"
 	"sigs.k8s.io/signalhound/internal/tui"
 )
+
+const MCP_SERVER = "localhost:8080"
 
 // abstractCmd represents the abstract command
 var abstractCmd = &cobra.Command{
@@ -22,9 +26,7 @@ var abstractCmd = &cobra.Command{
 }
 
 var (
-	tg                   = testgrid.NewTestGrid(testgrid.URL)
 	minFailure, minFlake int
-	refreshInterval      int
 	token                string
 )
 
@@ -35,8 +37,6 @@ func init() {
 		"minimum threshold for test failures, to disable use 0. Defaults to 0.")
 	abstractCmd.PersistentFlags().IntVarP(&minFlake, "min-flake", "m", 0,
 		"minimum threshold for test flakeness, to disable use 0. Defaults to 0.")
-	abstractCmd.PersistentFlags().IntVarP(&refreshInterval, "refresh-interval", "r", 0,
-		"refresh interval in seconds (0 to disable auto-refresh)")
 
 	token = os.Getenv("SIGNALHOUND_GITHUB_TOKEN")
 	if token == "" {
@@ -44,41 +44,40 @@ func init() {
 	}
 }
 
-// FetchTabSummary fetches all dashboard tabs from TestGrid.
-func FetchTabSummary() ([]*v1alpha1.DashboardTab, error) {
-	var dashboardTabs []*v1alpha1.DashboardTab
-	for _, dashboard := range []string{"sig-release-master-blocking", "sig-release-master-informing"} {
-		dashSummaries, err := tg.FetchTabSummary(dashboard, v1alpha1.ERROR_STATUSES)
-		if err != nil {
-			return nil, err
-		}
-		for _, dashSummary := range dashSummaries {
-			dashTab, err := tg.FetchTabTests(&dashSummary, minFailure, minFlake)
-			if err != nil {
-				fmt.Println(fmt.Errorf("error fetching table : %s", err))
-				continue
-			}
-			if len(dashTab.TestRuns) > 0 {
-				dashboardTabs = append(dashboardTabs, dashTab)
-			}
-		}
-	}
-	return dashboardTabs, nil
-}
-
 // RunAbstract starts the main command to scrape TestGrid.
 func RunAbstract(cmd *cobra.Command, args []string) error {
-	dashboardTabs, err := FetchTabSummary()
-	if err != nil {
-		return err
+	var (
+		tg            = testgrid.NewTestGrid(testgrid.URL)
+		dashboardTabs []*v1alpha1.DashboardTab
+		dashboards    = []string{"sig-release-master-blocking", "sig-release-master-informing"}
+	)
+
+	// start the MCP server in the background
+	go startMCPServer()
+
+	fmt.Println("Scraping the testgrid dashboard, wait...")
+	tuiInstance := tui.NewMultiWindowTUI(dashboardTabs, token)
+	tuiInstance.SetRefreshConfig(tg, dashboards, minFailure, minFlake)
+	return tuiInstance.Run()
+}
+
+// startMCPServer starts the MCP server in the background
+func startMCPServer() {
+	ctx := context.Background()
+	mcpToken := os.Getenv("ANTHROPIC_API_KEY")
+	if mcpToken == "" {
+		log.Println("Warning: ANTHROPIC_API_KEY not set, MCP server will not start")
+		return
+	}
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	if githubToken == "" {
+		log.Println("Warning: GITHUB_TOKEN not set, MCP server will not start")
+		return
 	}
 
-	var refreshFunc func() ([]*v1alpha1.DashboardTab, error)
-	if refreshInterval > 0 {
-		refreshFunc = func() ([]*v1alpha1.DashboardTab, error) {
-			return FetchTabSummary()
-		}
+	server := mcp.NewMCPServer(ctx, githubToken)
+	log.Printf("MCP handler listening at %s", MCP_SERVER)
+	if err := http.ListenAndServe(MCP_SERVER, server.NewHTTPHandler()); err != nil {
+		log.Printf("MCP server error: %v", err)
 	}
-
-	return tui.RenderVisual(dashboardTabs, token, time.Duration(refreshInterval)*time.Second, refreshFunc)
 }

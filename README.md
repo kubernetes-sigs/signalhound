@@ -37,7 +37,8 @@ Prerequisites
 
 * Go 1.24 or later
 * Git
-* Github Token PAT
+* Github Token PAT (required for GitHub integration and MCP server)
+* Anthropic API Key (optional, required for AI-powered analysis in MCP client)
 * Kubernetes cluster (kind)
 
 ### Prerequisites
@@ -57,6 +58,64 @@ export SIGNALHOUND_GITHUB_TOKEN=<github.pat.for.signalhound>
 # var that is well-known and may be read by other binaries.
 export GITHUB_TOKEN=<github.pat.default>
 ```
+
+## Model Context Protocol (MCP) Integration
+
+Signalhound includes a Model Context Protocol (MCP) integration that enables AI-powered analysis of failing tests and GitHub issues. The MCP system consists of two components:
+
+### MCP Server
+
+The MCP server runs automatically when you start the `abstract` command. It provides tools for querying GitHub project issues and is accessible at `http://localhost:8080/mcp` by default.
+
+**Required Environment Variables:**
+- `GITHUB_TOKEN` or `SIGNALHOUND_GITHUB_TOKEN` - GitHub Personal Access Token with `read:project` scope (required for the MCP server to query GitHub project issues)
+
+**Features:**
+- Lists all issues from the SIG Signal project board
+- Filters issues by latest Kubernetes release version and FAILING status
+- Returns issue details including number, title, body, state, and URL
+
+### MCP Client
+
+The MCP client is used by the TUI to analyze failing tests and compare them with existing GitHub issues using Anthropic's Claude AI.
+
+**Required Environment Variables:**
+- `ANTHROPIC_API_KEY` or `SIGNALHOUND_ANTHROPIC_API_KEY` - Anthropic API key for Claude AI analysis (required for AI-powered issue comparison)
+- `MCP_SERVER_ENDPOINT` - MCP server endpoint URL (optional, defaults to `http://localhost:8080/mcp`)
+
+**Features:**
+- Compares currently failing tests with existing GitHub issues
+- Identifies tests that don't have corresponding GitHub issues
+- Provides AI-generated summaries and recommendations
+
+### Complete Setup
+
+To enable all MCP features, set the following environment variables:
+
+```bash
+# GitHub token for MCP server (to query project issues)
+export GITHUB_TOKEN=<your-github-pat>
+# or
+export SIGNALHOUND_GITHUB_TOKEN=<your-github-pat>
+
+# Anthropic API key for MCP client (for AI analysis)
+export ANTHROPIC_API_KEY=<your-anthropic-api-key>
+# or
+export SIGNALHOUND_ANTHROPIC_API_KEY=<your-anthropic-api-key>
+
+# Optional: Custom MCP server endpoint (defaults to http://localhost:8080/mcp)
+export MCP_SERVER_ENDPOINT=http://localhost:8080/mcp
+```
+
+### Getting an Anthropic API Key
+
+1. Visit [Anthropic's Console](https://console.anthropic.com/)
+2. Sign up or log in to your account
+3. Navigate to API Keys section
+4. Create a new API key
+5. Copy the key and set it as `ANTHROPIC_API_KEY` or `SIGNALHOUND_ANTHROPIC_API_KEY`
+
+**Note:** The Anthropic API key is only required if you want to use the AI-powered analysis feature in the TUI. The MCP server will still work for listing issues without it, but the comparison and analysis features will not be available.
 
 ### Running at runtime
 
