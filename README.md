@@ -37,7 +37,7 @@ Prerequisites
 
 * Go 1.24 or later
 * Git
-* Github Token PAT
+* GitHub Token PAT
 * Kubernetes cluster (kind)
 
 ### Prerequisites

@@ -190,7 +190,7 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, token string, refreshInterval t
 
 	// GitHub panel rendering
 	setPanelDefaultStyle(githubPanel.Box)
-	githubPanel.SetTitle(formatTitle("Github Issue"))
+	githubPanel.SetTitle(formatTitle("GitHub Issue"))
 	githubPanel.SetWrap(true).SetDisabled(true)
 	githubPanel.SetTextStyle(tcell.StyleDefault)
 
