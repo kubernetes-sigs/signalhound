@@ -26,7 +26,7 @@ Configure with a Personal Access Token (PAT) with appropriate repository permiss
 
 * Clipboard Integration
 
-Press Ctrl-Space on any panel to copy content to clipboard
+Press yy on any panel to copy content to clipboard
 Currently optimized for WSL2 environments
 
 ## Usage
