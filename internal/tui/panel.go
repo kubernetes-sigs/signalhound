@@ -16,7 +16,10 @@ import (
 	"sigs.k8s.io/signalhound/internal/github"
 )
 
-const defaultPositionText = "[green]Select a content Windows and press [blue]Ctrl-Space [green]to COPY or press [blue]Ctrl-C [green]to exit"
+const (
+	defaultPositionText = "[green]Select a content Windows and press [blue]yy [green]to COPY or press [blue]Ctrl-C [green]to exit"
+	yankTimeout         = 750 * time.Millisecond
+)
 
 var (
 	pagesName         = "SignalHound"
@@ -31,7 +34,25 @@ var (
 	githubToken       string                   // Store token for refresh
 	selectedBoardHash string                   // Store selected BoardHash for refresh preservation
 	selectedTestName  string                   // Store selected test name for refresh preservation
+	lastSlackYPress   time.Time                // Track "yy" clipboard shortcut in Slack panel
+	lastGithubYPress  time.Time                // Track "yy" clipboard shortcut in GitHub panel
 )
+
+func isYankShortcut(event *tcell.EventKey, lastPress *time.Time) bool {
+	if event.Key() != tcell.KeyRune || (event.Rune() != 'y' && event.Rune() != 'Y') {
+		*lastPress = time.Time{}
+		return false
+	}
+
+	now := time.Now()
+	if !lastPress.IsZero() && now.Sub(*lastPress) <= yankTimeout {
+		*lastPress = time.Time{}
+		return true
+	}
+
+	*lastPress = now
+	return false
+}
 
 func formatTitle(txt string) string {
 	// var titleColor = "green"
@@ -251,10 +272,10 @@ func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResu
 		currentTest.TestName, currentTest.ProwJobURL, currentTest.TriageURL, timeClean(currentTest.LatestTimestamp),
 	)
 
-	// set input capture, ctrl-space for clipboard copy, esc to cancel panel selection.
+	// set input capture, "yy" for clipboard copy, esc to cancel panel selection.
 	slackPanel.SetText(item, true)
 	slackPanel.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyCtrlSpace {
+		if isYankShortcut(event, &lastSlackYPress) {
 			position.SetText("[blue]COPIED [yellow]SLACK [blue]TO THE CLIPBOARD!")
 			if err := CopyToClipboard(slackPanel.GetText()); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
@@ -313,10 +334,10 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 	issueTitle := fmt.Sprintf("[%v] %v", prefixTitle, currentTest.TestName)
 	githubPanel.SetText(issueBody, false)
 
-	// set input capture, ctrl-space for clipboard copy, ctrl-b for
+	// set input capture, "yy" for clipboard copy, ctrl-b for
 	// automatic GitHub draft issue creation.
 	githubPanel.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyCtrlSpace {
+		if isYankShortcut(event, &lastGithubYPress) {
 			position.SetText("[blue]COPIED [yellow]ISSUE [blue]TO THE CLIPBOARD!")
 			if err := CopyToClipboard(githubPanel.GetText()); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
