@@ -35,9 +35,9 @@ var (
 	selectedBoardHash string                   // Store selected BoardHash for refresh preservation
 	selectedTestName  string                   // Store selected test name for refresh preservation
 	lastSlackYPress   time.Time                // Track "yy" clipboard shortcut in Slack panel
-	lastGithubYPress  time.Time                // Track "yy" clipboard shortcut in GitHub panel
+	lastGitHubYPress  time.Time                // Track "yy" clipboard shortcut in GitHub panel
 	lastSlackGPress   time.Time                // Track "gg" go-to-top shortcut in Slack panel
-	lastGithubGPress  time.Time                // Track "gg" go-to-top shortcut in GitHub panel
+	lastGitHubGPress  time.Time                // Track "gg" go-to-top shortcut in GitHub panel
 )
 
 func isDoubleRuneShortcut(event *tcell.EventKey, lastPress *time.Time, runes ...rune) bool {
@@ -437,7 +437,7 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 		if event.Key() == tcell.KeyRune {
 			switch event.Rune() {
 			case 'y', 'Y':
-				if isYankShortcut(event, &lastGithubYPress) {
+				if isYankShortcut(event, &lastGitHubYPress) {
 					position.SetText("[blue]COPIED [yellow]ISSUE [blue]TO THE CLIPBOARD!")
 					if err := CopyToClipboard(githubPanel.GetText()); err != nil {
 						position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
@@ -454,7 +454,7 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 				moveTextAreaToBottom(githubPanel)
 				return nil
 			case 'g':
-				if isGoTopShortcut(event, &lastGithubGPress) {
+				if isGoTopShortcut(event, &lastGitHubGPress) {
 					moveTextAreaToTop(githubPanel)
 				}
 				return nil
