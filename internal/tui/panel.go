@@ -35,15 +35,27 @@ var (
 	selectedBoardHash string                   // Store selected BoardHash for refresh preservation
 	selectedTestName  string                   // Store selected test name for refresh preservation
 	lastSlackYPress   time.Time                // Track "yy" clipboard shortcut in Slack panel
-	lastGithubYPress  time.Time                // Track "yy" clipboard shortcut in GitHub panel
+	lastGitHubYPress  time.Time                // Track "yy" clipboard shortcut in GitHub panel
+	lastSlackGPress   time.Time                // Track "gg" go-to-top shortcut in Slack panel
+	lastGitHubGPress  time.Time                // Track "gg" go-to-top shortcut in GitHub panel
 )
 
-func isYankShortcut(event *tcell.EventKey, lastPress *time.Time) bool {
-	if event.Key() != tcell.KeyRune || (event.Rune() != 'y' && event.Rune() != 'Y') {
+func isDoubleRuneShortcut(event *tcell.EventKey, lastPress *time.Time, runes ...rune) bool {
+	if event.Key() != tcell.KeyRune {
 		*lastPress = time.Time{}
 		return false
 	}
-
+	accepted := false
+	for _, r := range runes {
+		if event.Rune() == r {
+			accepted = true
+			break
+		}
+	}
+	if !accepted {
+		*lastPress = time.Time{}
+		return false
+	}
 	now := time.Now()
 	if !lastPress.IsZero() && now.Sub(*lastPress) <= yankTimeout {
 		*lastPress = time.Time{}
@@ -54,10 +66,78 @@ func isYankShortcut(event *tcell.EventKey, lastPress *time.Time) bool {
 	return false
 }
 
+func isYankShortcut(event *tcell.EventKey, lastPress *time.Time) bool {
+	return isDoubleRuneShortcut(event, lastPress, 'y', 'Y')
+}
+
+func isGoTopShortcut(event *tcell.EventKey, lastPress *time.Time) bool {
+	return isDoubleRuneShortcut(event, lastPress, 'g')
+}
+
 func formatTitle(txt string) string {
 	// var titleColor = "green"
 	// return fmt.Sprintf(" [%s:bg:b]%s[-:-:-] ", titleColor, txt)
 	return fmt.Sprintf(" [:bg:b]%s[-:-:-] ", txt)
+}
+
+func moveTextAreaToTop(area *tview.TextArea) {
+	area.Select(0, 0)
+	handler := area.InputHandler()
+	for i := 0; i < 4096; i++ {
+		prevRow, _, _, _ := area.GetCursor()
+		prevOffsetRow, prevOffsetCol := area.GetOffset()
+		handler(tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone), func(tview.Primitive) {})
+		row, _, _, _ := area.GetCursor()
+		offsetRow, offsetCol := area.GetOffset()
+		if row == prevRow && offsetRow == prevOffsetRow && offsetCol == prevOffsetCol {
+			break
+		}
+	}
+}
+
+func moveTextAreaToBottom(area *tview.TextArea) {
+	text := area.GetText()
+	end := len(strings.TrimRight(text, "\r\n"))
+	area.Select(end, end)
+	handler := area.InputHandler()
+	for i := 0; i < 4096; i++ {
+		prevRow, _, _, _ := area.GetCursor()
+		prevOffsetRow, prevOffsetCol := area.GetOffset()
+		handler(tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone), func(tview.Primitive) {})
+		row, _, _, _ := area.GetCursor()
+		offsetRow, offsetCol := area.GetOffset()
+		if row == prevRow && offsetRow == prevOffsetRow && offsetCol == prevOffsetCol {
+			break
+		}
+	}
+}
+
+func closeDetailPanels() {
+	slackPanel.SetText("", false)
+	githubPanel.SetText("", false)
+	app.SetFocus(brokenPanel)
+}
+
+func flashPanelCopyState(panel *tview.TextArea) {
+	setPanelFocusStyle(panel.Box)
+	panel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
+	go func() {
+		time.Sleep(1 * time.Second)
+		app.QueueUpdateDraw(func() {
+			app.SetFocus(brokenPanel)
+			setPanelDefaultStyle(panel.Box)
+			panel.SetTextStyle(tcell.StyleDefault)
+		})
+	}()
+}
+
+func isReadOnlyMutationKey(key tcell.Key) bool {
+	switch key {
+	case tcell.KeyEnter, tcell.KeyBackspace, tcell.KeyBackspace2, tcell.KeyDelete, tcell.KeyTab, tcell.KeyBacktab:
+		return true
+	default:
+		return false
+	}
 }
 
 func defaultBorderStyle() tcell.Style {
@@ -206,13 +286,13 @@ func RenderVisual(tabs []*v1alpha1.DashboardTab, token string, refreshInterval t
 	// Slack Final issue rendering
 	setPanelDefaultStyle(slackPanel.Box)
 	slackPanel.SetTitle(formatTitle("Slack Message"))
-	slackPanel.SetWrap(true).SetDisabled(true)
+	slackPanel.SetWrap(true)
 	slackPanel.SetTextStyle(tcell.StyleDefault)
 
 	// GitHub panel rendering
 	setPanelDefaultStyle(githubPanel.Box)
 	githubPanel.SetTitle(formatTitle("GitHub Issue"))
-	githubPanel.SetWrap(true).SetDisabled(true)
+	githubPanel.SetWrap(true)
 	githubPanel.SetTextStyle(tcell.StyleDefault)
 
 	// Final position bottom panel for information
@@ -271,34 +351,51 @@ func updateSlackPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestResu
 		tab.StateIcon, cases.Title(language.English).String(tab.TabState), tab.BoardHash, tab.TabURL,
 		currentTest.TestName, currentTest.ProwJobURL, currentTest.TriageURL, timeClean(currentTest.LatestTimestamp),
 	)
+	item = strings.TrimRight(item, "\r\n")
 
 	// set input capture, "yy" for clipboard copy, esc to cancel panel selection.
-	slackPanel.SetText(item, true)
+	slackPanel.SetText(item, false)
 	slackPanel.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if isYankShortcut(event, &lastSlackYPress) {
-			position.SetText("[blue]COPIED [yellow]SLACK [blue]TO THE CLIPBOARD!")
-			if err := CopyToClipboard(slackPanel.GetText()); err != nil {
-				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
-				return event
+		if event.Key() == tcell.KeyRune {
+			switch event.Rune() {
+			case 'y', 'Y':
+				if isYankShortcut(event, &lastSlackYPress) {
+					position.SetText("[blue]COPIED [yellow]SLACK [blue]TO THE CLIPBOARD!")
+					if err := CopyToClipboard(slackPanel.GetText()); err != nil {
+						position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
+						return nil
+					}
+					flashPanelCopyState(slackPanel)
+				}
+				return nil
+			case 'j':
+				return tcell.NewEventKey(tcell.KeyDown, 0, event.Modifiers())
+			case 'k':
+				return tcell.NewEventKey(tcell.KeyUp, 0, event.Modifiers())
+			case 'G':
+				moveTextAreaToBottom(slackPanel)
+				return nil
+			case 'g':
+				if isGoTopShortcut(event, &lastSlackGPress) {
+					moveTextAreaToTop(slackPanel)
+				}
+				return nil
+			default:
+				// Read-only panel: ignore direct text edits.
+				return nil
 			}
-			setPanelFocusStyle(slackPanel.Box)
-			slackPanel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
-			go func() {
-				time.Sleep(1 * time.Second)
-				app.QueueUpdateDraw(func() {
-					app.SetFocus(brokenPanel)
-					setPanelDefaultStyle(slackPanel.Box)
-					slackPanel.SetTextStyle(tcell.StyleDefault)
-				})
-			}()
 		}
-		if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyUp {
-			slackPanel.SetText("", false)
-			githubPanel.SetText("", false)
-			app.SetFocus(brokenPanel)
+		if event.Key() == tcell.KeyEscape {
+			closeDetailPanels()
+			return nil
 		}
 		if event.Key() == tcell.KeyRight {
 			app.SetFocus(githubPanel)
+			return nil
+		}
+		if isReadOnlyMutationKey(event.Key()) {
+			// Read-only panel: block text mutation keys.
+			return nil
 		}
 		return event
 	})
@@ -330,35 +427,47 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 		position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
 		return
 	}
-	issueBody := template.String()
+	issueBody := strings.TrimRight(template.String(), "\r\n")
 	issueTitle := fmt.Sprintf("[%v] %v", prefixTitle, currentTest.TestName)
 	githubPanel.SetText(issueBody, false)
 
 	// set input capture, "yy" for clipboard copy, ctrl-b for
 	// automatic GitHub draft issue creation.
 	githubPanel.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if isYankShortcut(event, &lastGithubYPress) {
-			position.SetText("[blue]COPIED [yellow]ISSUE [blue]TO THE CLIPBOARD!")
-			if err := CopyToClipboard(githubPanel.GetText()); err != nil {
-				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
-				return event
+		if event.Key() == tcell.KeyRune {
+			switch event.Rune() {
+			case 'y', 'Y':
+				if isYankShortcut(event, &lastGitHubYPress) {
+					position.SetText("[blue]COPIED [yellow]ISSUE [blue]TO THE CLIPBOARD!")
+					if err := CopyToClipboard(githubPanel.GetText()); err != nil {
+						position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
+						return nil
+					}
+					flashPanelCopyState(githubPanel)
+				}
+				return nil
+			case 'j':
+				return tcell.NewEventKey(tcell.KeyDown, 0, event.Modifiers())
+			case 'k':
+				return tcell.NewEventKey(tcell.KeyUp, 0, event.Modifiers())
+			case 'G':
+				moveTextAreaToBottom(githubPanel)
+				return nil
+			case 'g':
+				if isGoTopShortcut(event, &lastGitHubGPress) {
+					moveTextAreaToTop(githubPanel)
+				}
+				return nil
+			default:
+				// Read-only panel: ignore direct text edits.
+				return nil
 			}
-			setPanelFocusStyle(githubPanel.Box)
-			githubPanel.SetTextStyle(tcell.StyleDefault.Foreground(tcell.ColorWhite))
-			go func() {
-				time.Sleep(1 * time.Second)
-				app.QueueUpdateDraw(func() {
-					app.SetFocus(brokenPanel)
-					setPanelDefaultStyle(githubPanel.Box)
-					githubPanel.SetTextStyle(tcell.StyleDefault)
-				})
-			}()
 		}
 		if event.Key() == tcell.KeyCtrlB {
 			gh := github.NewProjectManager(context.Background(), token)
 			if err := gh.CreateDraftIssue(issueTitle, issueBody, tab.BoardHash); err != nil {
 				position.SetText(fmt.Sprintf("[red]error: %v", err.Error()))
-				return event
+				return nil
 			}
 			position.SetText("[blue]Created [yellow]DRAFT ISSUE [blue] on GitHub Project!")
 			setPanelFocusStyle(githubPanel.Box)
@@ -368,17 +477,23 @@ func updateGitHubPanel(tab *v1alpha1.DashboardTab, currentTest *v1alpha1.TestRes
 					setPanelDefaultStyle(githubPanel.Box)
 				})
 			}()
+			return nil
 		}
 		if event.Key() == tcell.KeyEscape {
-			slackPanel.SetText("", false)
-			githubPanel.SetText("", false)
-			app.SetFocus(brokenPanel)
+			closeDetailPanels()
+			return nil
 		}
 		if event.Key() == tcell.KeyLeft {
 			app.SetFocus(slackPanel)
+			return nil
 		}
 		if event.Key() == tcell.KeyRight {
 			app.SetFocus(slackPanel)
+			return nil
+		}
+		if isReadOnlyMutationKey(event.Key()) {
+			// Read-only panel: block text mutation keys.
+			return nil
 		}
 		return event
 	})
