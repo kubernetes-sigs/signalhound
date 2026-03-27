@@ -21,11 +21,14 @@ var abstractCmd = &cobra.Command{
 	RunE:  RunAbstract,
 }
 
+var defaultDashboards = []string{"sig-release-master-blocking", "sig-release-master-informing"}
+
 var (
 	tg                   = testgrid.NewTestGrid(testgrid.URL)
 	minFailure, minFlake int
 	refreshInterval      int
 	token                string
+	dashboards           []string
 )
 
 func init() {
@@ -37,6 +40,8 @@ func init() {
 		"minimum threshold for test flakeness, to disable use 0. Defaults to 0.")
 	abstractCmd.PersistentFlags().IntVarP(&refreshInterval, "refresh-interval", "r", 0,
 		"refresh interval in seconds (0 to disable auto-refresh)")
+	abstractCmd.PersistentFlags().StringSliceVarP(&dashboards, "dashboards", "d", defaultDashboards,
+		"comma-separated list of TestGrid dashboards to monitor (e.g. sig-release-1.35-blocking,sig-release-1.35-informing)")
 
 	token = os.Getenv("SIGNALHOUND_GITHUB_TOKEN")
 	if token == "" {
@@ -47,7 +52,7 @@ func init() {
 // FetchTabSummary fetches all dashboard tabs from TestGrid.
 func FetchTabSummary() ([]*v1alpha1.DashboardTab, error) {
 	var dashboardTabs []*v1alpha1.DashboardTab
-	for _, dashboard := range []string{"sig-release-master-blocking", "sig-release-master-informing"} {
+	for _, dashboard := range dashboards {
 		dashSummaries, err := tg.FetchTabSummary(dashboard, v1alpha1.ERROR_STATUSES)
 		if err != nil {
 			return nil, err
