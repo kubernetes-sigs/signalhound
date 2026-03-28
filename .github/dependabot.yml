@@ -17,6 +17,9 @@ updates:
       ginkgo:
         patterns:
           - "*onsi*"
+      golangx:
+        patterns:
+          - "*golang.org/x/*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
