@@ -21,6 +21,16 @@ var (
 
 const tabURL = "%s/%s/table?tab=%s&exclude-non-failed-tests=&dashboard=%s"
 
+// Values mirror TestGrid's test_status.TestStatus enum.
+const (
+	testStatusTimedOut        = 9
+	testStatusCategorizedFail = 10
+	testStatusBuildFail       = 11
+	testStatusFail            = 12
+	testStatusFlaky           = 13
+	testStatusToolFail        = 14
+)
+
 // TestGroup serializes the content from testgrid tab endpoint
 type TestGroup struct {
 	TestGroupName      string     `json:"test-group-name"`
@@ -55,26 +65,74 @@ type Statuses struct {
 }
 
 // RenderStatuses renders the statuses of a test into a string.
-func (te *Test) RenderStatuses(timestamps []int64) (string, int, int) {
-	var firstFailureIndex = -1
-	var failureCount = 0
-	var output strings.Builder
-
-	for i, shortText := range te.ShortTexts {
-		if shortText == "" {
-			continue
-		}
-
-		if firstFailureIndex < 0 {
-			firstFailureIndex = i
-		}
-
-		formattedStatus := formatTestStatus(shortText, timestamps[i], te.Messages[i])
-		output.WriteString(formattedStatus)
-		failureCount++
+func (te *Test) RenderStatuses(timestamps []int64) (string, int, int, int, error) {
+	if len(te.ShortTexts) != len(timestamps) || len(te.Messages) != len(timestamps) {
+		return "", 0, -1, -1, fmt.Errorf(
+			"column data is not aligned: %d timestamps, %d short texts, %d messages",
+			len(timestamps), len(te.ShortTexts), len(te.Messages),
+		)
 	}
 
-	return output.String(), failureCount, firstFailureIndex
+	latestFailureIndex := -1
+	firstFailureIndex := -1
+	failureCount := 0
+	columnIndex := 0
+	var output strings.Builder
+
+	for _, statusRun := range te.Statuses {
+		if statusRun.Count < 0 {
+			return "", 0, -1, -1, fmt.Errorf("status run has negative count %d", statusRun.Count)
+		}
+		for range statusRun.Count {
+			if columnIndex >= len(timestamps) {
+				return "", 0, -1, -1, fmt.Errorf(
+					"status data has more columns than the %d timestamps",
+					len(timestamps),
+				)
+			}
+			if !isFailureStatus(statusRun.Value) {
+				columnIndex++
+				continue
+			}
+
+			if latestFailureIndex < 0 {
+				latestFailureIndex = columnIndex
+			}
+			firstFailureIndex = columnIndex
+
+			formattedStatus := formatTestStatus(
+				te.ShortTexts[columnIndex],
+				timestamps[columnIndex],
+				te.Messages[columnIndex],
+			)
+			output.WriteString(formattedStatus)
+			failureCount++
+			columnIndex++
+		}
+	}
+
+	if columnIndex != len(timestamps) {
+		return "", 0, -1, -1, fmt.Errorf(
+			"status data has %d columns; expected %d",
+			columnIndex, len(timestamps),
+		)
+	}
+
+	return output.String(), failureCount, latestFailureIndex, firstFailureIndex, nil
+}
+
+func isFailureStatus(status int) bool {
+	switch status {
+	case testStatusTimedOut,
+		testStatusCategorizedFail,
+		testStatusBuildFail,
+		testStatusFail,
+		testStatusFlaky,
+		testStatusToolFail:
+		return true
+	default:
+		return false
+	}
 }
 
 type TestGrid struct {
@@ -96,6 +154,10 @@ func (t *TestGrid) FetchTabSummary(dashboard string, filterStatus []string) (sum
 	if response, err = http.Get(url); err != nil {
 		return nil, fmt.Errorf("error fetching testgrid dashboard summary endpoint: %v", err)
 	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("testgrid dashboard summary endpoint returned %s", response.Status)
+	}
 
 	var data []byte
 	if data, err = io.ReadAll(response.Body); err != nil {
@@ -107,14 +169,21 @@ func (t *TestGrid) FetchTabSummary(dashboard string, filterStatus []string) (sum
 	if err = json.Unmarshal(data, &dashboardList); err != nil {
 		return nil, fmt.Errorf("error unmarshaling body response: %v", err)
 	}
+	if dashboardList == nil {
+		return nil, fmt.Errorf("testgrid dashboard summary response is null")
+	}
 
-	return filterDashboards(dashboardList, t.URL, filterStatus), nil
+	return filterDashboards(dashboardList, t.URL, filterStatus)
 }
 
-func filterDashboards(dashboardList DashboardMapper, url string, filterStatus []string) (summary []v1alpha1.DashboardSummary) {
+func filterDashboards(dashboardList DashboardMapper, url string, filterStatus []string) ([]v1alpha1.DashboardSummary, error) {
+	summary := make([]v1alpha1.DashboardSummary, 0, len(dashboardList))
 	// iterate and save the final value filtering by status
 	// and enhance tab payload
 	for tabName, dashboardSummary := range dashboardList {
+		if dashboardSummary == nil {
+			return nil, fmt.Errorf("TestGrid summary entry %q is null", tabName)
+		}
 		if hasStatus(dashboardSummary.OverallState, filterStatus) {
 			dashboardSummary.DashboardURL = url
 			if dashboardSummary.DashboardTab == nil {
@@ -127,14 +196,22 @@ func filterDashboards(dashboardList DashboardMapper, url string, filterStatus []
 			summary = append(summary, *dashboardSummary)
 		}
 	}
-	return summary
+	return summary, nil
 }
 
 // FetchTabTests returns the test group related to the tab of a dashboard
 func (t *TestGrid) FetchTabTests(summary *v1alpha1.DashboardSummary, minFailure, minFlake int) (tab *v1alpha1.DashboardTab, err error) {
+	if summary == nil || summary.DashboardTab == nil {
+		return nil, fmt.Errorf("dashboard summary and tab must not be nil")
+	}
+
 	var response *http.Response
 	if response, err = http.Get(summary.DashboardTab.TabURL); err != nil {
 		return tab, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return tab, fmt.Errorf("testgrid table endpoint returned %s", response.Status)
 	}
 
 	var data []byte
@@ -143,32 +220,62 @@ func (t *TestGrid) FetchTabTests(summary *v1alpha1.DashboardSummary, minFailure,
 	}
 
 	// unmarshal test group and be converted into the internal dashboard format
-	var testGroup = &TestGroup{}
-	if err = json.Unmarshal(data, testGroup); err != nil {
+	var testGroup *TestGroup
+	if err = json.Unmarshal(data, &testGroup); err != nil {
 		return tab, err
+	}
+	if testGroup == nil {
+		return nil, fmt.Errorf("testgrid table response is null")
+	}
+	if len(testGroup.Changelists) != len(testGroup.Timestamps) {
+		return nil, fmt.Errorf(
+			"TestGrid column data is not aligned: %d timestamps, %d changelists",
+			len(testGroup.Timestamps), len(testGroup.Changelists),
+		)
 	}
 
 	aggregation := fmt.Sprintf("%s#%s", summary.DashboardName, summary.DashboardTab.TabName)
+	tabState := summary.OverallState
+	filterState := tabState
+	if filterState == v1alpha1.PASSING_STATUS {
+		filterState = v1alpha1.FLAKY_STATUS
+		minFlake = max(minFlake, 1)
+	}
+	testRuns, err := filterTabTests(testGroup, filterState, minFailure, minFlake)
+	if err != nil {
+		return nil, err
+	}
+	if tabState == v1alpha1.PASSING_STATUS && len(testRuns) > 0 {
+		tabState = v1alpha1.FLAKY_STATUS
+	}
+
 	icon := ":large_purple_square:"
-	if summary.OverallState == v1alpha1.FAILING_STATUS {
+	switch tabState {
+	case v1alpha1.FAILING_STATUS:
 		icon = ":large_red_square:"
+	case v1alpha1.PASSING_STATUS:
+		icon = ":large_green_square:"
 	}
 
 	summary.DashboardTab.BoardHash = aggregation
 	summary.DashboardTab.TabURL = cleanHTMLCharacters(fmt.Sprintf("https://testgrid.k8s.io/%s&exclude-non-failed-tests=", aggregation))
-	summary.DashboardTab.TestRuns = filterTabTests(testGroup, summary.OverallState, minFailure, minFlake)
-	summary.DashboardTab.TabState = summary.OverallState
+	summary.DashboardTab.TestRuns = testRuns
+	summary.DashboardTab.TabState = tabState
 	summary.DashboardTab.StateIcon = icon
 
 	return summary.DashboardTab, nil
 }
 
-func filterTabTests(testGroup *TestGroup, state string, minFailure, minFlake int) (tests []v1alpha1.TestResult) {
+func filterTabTests(testGroup *TestGroup, state string, minFailure, minFlake int) ([]v1alpha1.TestResult, error) {
+	tests := make([]v1alpha1.TestResult, 0)
 	jobName := strings.Split(testGroup.Query, "/")
 	for _, test := range testGroup.Tests {
-		errMessage, failures, firstFailure := test.RenderStatuses(testGroup.Timestamps)
-		if ((failures >= minFailure || minFailure == 0) && state == v1alpha1.FAILING_STATUS) ||
-			((failures >= minFlake || minFlake == 0) && state == v1alpha1.FLAKY_STATUS) {
+		errMessage, failures, latestFailure, firstFailure, err := test.RenderStatuses(testGroup.Timestamps)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TestGrid row %q: %w", test.Name, err)
+		}
+		if failures > 0 && (((failures >= minFailure || minFailure == 0) && state == v1alpha1.FAILING_STATUS) ||
+			((failures >= minFlake || minFlake == 0) && state == v1alpha1.FLAKY_STATUS)) {
 			testName := test.Name
 			if strings.Contains(testName, e2eSuitePrefix) {
 				testName = prow.GetRegexParameter(testRegex, testName)["TEST"]
@@ -177,21 +284,27 @@ func filterTabTests(testGroup *TestGroup, state string, minFailure, minFlake int
 				testName = strings.TrimPrefix(strings.TrimPrefix(testName, "kubetest2."), "kubetest.")
 			}
 
+			latestTimestamp := testGroup.Timestamps[0]
+			firstTimestamp := testGroup.Timestamps[len(testGroup.Timestamps)-1]
 			var prowJobURL string
-			if firstFailure >= 0 && firstFailure < len(testGroup.Changelists) {
-				prowJobURL = cleanHTMLCharacters(fmt.Sprintf("https://prow.k8s.io/view/gs/%s/%s", testGroup.Query, testGroup.Changelists[firstFailure]))
+			if latestFailure >= 0 && latestFailure < len(testGroup.Changelists) {
+				prowJobURL = cleanHTMLCharacters(fmt.Sprintf("https://prow.k8s.io/view/gs/%s/%s", testGroup.Query, testGroup.Changelists[latestFailure]))
+			}
+			if latestFailure >= 0 {
+				latestTimestamp = testGroup.Timestamps[latestFailure]
+				firstTimestamp = testGroup.Timestamps[firstFailure]
 			}
 			tests = append(tests, v1alpha1.TestResult{
 				TestName:        test.Name,
-				LatestTimestamp: testGroup.Timestamps[0],
-				FirstTimestamp:  testGroup.Timestamps[len(testGroup.Timestamps)-1],
+				LatestTimestamp: latestTimestamp,
+				FirstTimestamp:  firstTimestamp,
 				ProwJobURL:      prowJobURL,
 				TriageURL:       cleanHTMLCharacters(fmt.Sprintf("https://storage.googleapis.com/k8s-triage/index.html?job=%s$&test=%s", cleanHTMLCharacters(jobName[len(jobName)-1]), cleanHTMLCharacters(testName))),
 				ErrorMessage:    errMessage,
 			})
 		}
 	}
-	return tests
+	return tests, nil
 }
 
 func hasStatus(boardStatus string, statuses []string) bool {
