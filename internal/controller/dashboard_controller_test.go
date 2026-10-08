@@ -90,7 +90,7 @@ var _ = Describe("Dashboard Controller", func() {
 		const resourceName = "threshold-resource"
 		const dashboardName = "threshold-dashboard"
 
-		It("should apply minFailures to failing tabs and minFlakes to flaky tabs", func() {
+		DescribeTable("should apply minFailures to failing tabs and minFlakes to flaky tabs", func(minFailures, minFlakes int, wantFailing, wantFlaky float64) {
 			By("serving a failing and a flaky tab whose only test failed twice")
 			table := testgrid.TestGroup{
 				Query:       "bucket/logs/ci-job",
@@ -124,8 +124,8 @@ var _ = Describe("Dashboard Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: metav1.NamespaceDefault},
 				Spec: testgridv1alpha1.DashboardSpec{
 					DashboardTab: dashboardName,
-					MinFailures:  2,
-					MinFlakes:    3,
+					MinFailures:  minFailures,
+					MinFlakes:    minFlakes,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -134,7 +134,6 @@ var _ = Describe("Dashboard Controller", func() {
 			})
 
 			By("reconciling the created resource")
-			// The filtered tests are only exported through the tab gauges.
 			Expect(initMetrics()).To(Succeed())
 			controllerReconciler := &DashboardReconciler{
 				Client: k8sClient,
@@ -145,9 +144,13 @@ var _ = Describe("Dashboard Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(tabGauge("testgrid_test_failures_total_ratio", dashboardName, "failing-tab")).To(Equal(1.0))
-			Expect(tabGauge("testgrid_test_flakes_total_ratio", dashboardName, "flaky-tab")).To(BeZero())
-		})
+			By("checking the tab gauges")
+			Expect(tabGauge("testgrid_test_failures_total_ratio", dashboardName, "failing-tab")).To(Equal(wantFailing))
+			Expect(tabGauge("testgrid_test_flakes_total_ratio", dashboardName, "flaky-tab")).To(Equal(wantFlaky))
+		},
+			Entry("when minFailures is the lower threshold", 2, 3, 1.0, 0.0),
+			Entry("when minFlakes is the lower threshold", 3, 2, 0.0, 1.0),
+		)
 	})
 })
 
