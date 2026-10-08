@@ -207,7 +207,7 @@ func (r *DashboardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			tabName := dashSummary.DashboardTab.TabName
 
 			var tab *testgridv1alpha1.DashboardTab
-			if tab, err = grid.FetchTabTests(&dashSummary, dashboard.Spec.MinFlakes, dashboard.Spec.MinFailures); err != nil {
+			if tab, err = grid.FetchTabTests(&dashSummary, dashboard.Spec.MinFailures, dashboard.Spec.MinFlakes); err != nil {
 				r.log.Error(err, "error fetching table", "tab", tabName)
 				span.RecordError(err)
 				continue
