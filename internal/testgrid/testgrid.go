@@ -21,6 +21,8 @@ var (
 
 const tabURL = "%s/%s/table?tab=%s&exclude-non-failed-tests=&dashboard=%s"
 
+const testStatusNoResult = 0 // TestGrid NO_RESULT
+
 // TestGroup serializes the content from testgrid tab endpoint
 type TestGroup struct {
 	TestGroupName      string     `json:"test-group-name"`
@@ -54,27 +56,60 @@ type Statuses struct {
 	Value int `json:"value"`
 }
 
-// RenderStatuses renders the statuses of a test into a string.
+// RenderStatuses renders the statuses of a test into a string. The returned
+// index is the column of the first rendered status.
 func (te *Test) RenderStatuses(timestamps []int64) (string, int, int) {
 	var firstFailureIndex = -1
 	var failureCount = 0
 	var output strings.Builder
 
+	columns := te.resultColumns(len(timestamps))
 	for i, shortText := range te.ShortTexts {
 		if shortText == "" {
 			continue
 		}
 
 		if firstFailureIndex < 0 {
-			firstFailureIndex = i
+			firstFailureIndex = columns[i]
 		}
 
-		formattedStatus := formatTestStatus(shortText, timestamps[i], te.Messages[i])
+		formattedStatus := formatTestStatus(shortText, timestamps[columns[i]], te.Messages[i])
 		output.WriteString(formattedStatus)
 		failureCount++
 	}
 
 	return output.String(), failureCount, firstFailureIndex
+}
+
+// resultColumns returns the column of each ShortTexts entry. ShortTexts and
+// Messages skip NO_RESULT cells, so their indexes can lag behind the columns.
+func (te *Test) resultColumns(numColumns int) []int {
+	columns := make([]int, 0, len(te.ShortTexts))
+	column := 0
+	invalidStatuses := false
+	for _, status := range te.Statuses {
+		if status.Count < 0 {
+			// A negative count can't describe a run.
+			invalidStatuses = true
+			break
+		}
+		// Stop one column past the end, so a huge count can't hang and
+		// still fails the length check below.
+		for range min(status.Count, numColumns-column+1) {
+			if status.Value != testStatusNoResult {
+				columns = append(columns, column)
+			}
+			column++
+		}
+	}
+	if invalidStatuses || column != numColumns || len(columns) != len(te.ShortTexts) {
+		// Statuses don't describe this row, so keep the positional mapping.
+		columns = columns[:0]
+		for i := range te.ShortTexts {
+			columns = append(columns, i)
+		}
+	}
+	return columns
 }
 
 type TestGrid struct {
