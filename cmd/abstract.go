@@ -5,6 +5,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,6 +23,15 @@ var abstractCmd = &cobra.Command{
 }
 
 var defaultDashboards = []string{"sig-release-master-blocking", "sig-release-master-informing"}
+
+const maxConcurrentTabFetches = 8
+
+// Passing tabs can still contain historical failures outside TestGrid's summary window.
+var monitoredStatuses = []string{
+	v1alpha1.PASSING_STATUS,
+	v1alpha1.FAILING_STATUS,
+	v1alpha1.FLAKY_STATUS,
+}
 
 var (
 	tg                   = testgrid.NewTestGrid(testgrid.URL)
@@ -53,22 +63,48 @@ func init() {
 func FetchTabSummary() ([]*v1alpha1.DashboardTab, error) {
 	var dashboardTabs []*v1alpha1.DashboardTab
 	for _, dashboard := range dashboards {
-		dashSummaries, err := tg.FetchTabSummary(dashboard, v1alpha1.ERROR_STATUSES)
+		dashSummaries, err := tg.FetchTabSummary(dashboard, monitoredStatuses)
 		if err != nil {
 			return nil, err
 		}
-		for _, dashSummary := range dashSummaries {
-			dashTab, err := tg.FetchTabTests(&dashSummary, minFailure, minFlake)
-			if err != nil {
-				fmt.Println(fmt.Errorf("error fetching table : %s", err))
-				continue
-			}
-			if len(dashTab.TestRuns) > 0 {
-				dashboardTabs = append(dashboardTabs, dashTab)
-			}
-		}
+		dashboardTabs = append(dashboardTabs, fetchDashboardTabs(dashSummaries)...)
 	}
 	return dashboardTabs, nil
+}
+
+func fetchDashboardTabs(summaries []v1alpha1.DashboardSummary) []*v1alpha1.DashboardTab {
+	type fetchResult struct {
+		tab *v1alpha1.DashboardTab
+		err error
+	}
+
+	results := make([]fetchResult, len(summaries))
+	semaphore := make(chan struct{}, maxConcurrentTabFetches)
+	var waitGroup sync.WaitGroup
+
+	for i := range summaries {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			results[i].tab, results[i].err = tg.FetchTabTests(&summaries[i], minFailure, minFlake)
+		}()
+	}
+	waitGroup.Wait()
+
+	dashboardTabs := make([]*v1alpha1.DashboardTab, 0, len(results))
+	for _, result := range results {
+		if result.err != nil {
+			fmt.Println(fmt.Errorf("error fetching table: %w", result.err))
+			continue
+		}
+		if len(result.tab.TestRuns) > 0 {
+			dashboardTabs = append(dashboardTabs, result.tab)
+		}
+	}
+	return dashboardTabs
 }
 
 // RunAbstract starts the main command to scrape TestGrid.
