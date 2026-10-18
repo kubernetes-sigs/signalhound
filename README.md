@@ -35,7 +35,7 @@ Currently optimized for WSL2 environments
 
 Prerequisites
 
-* Go 1.24 or later
+* Go 1.26 or later
 * Git
 * GitHub Token PAT
 * Kubernetes cluster (kind)
@@ -73,14 +73,14 @@ The `abstract` command supports the following flags to customize test monitoring
 
 #### `--min-failure` / `-f`
 - **Type**: Integer
-- **Default**: `2`
-- **Description**: Minimum threshold for test failures. Only tests with at least this many failures will be displayed in the TUI.
+- **Default**: `0` (disabled)
+- **Description**: Minimum threshold for test failures. Only tests with at least this many failures will be displayed in the TUI. Set to `0` to disable.
 - **Example**: `signalhound abstract --min-failure 3`
 
 #### `--min-flake` / `-m`
 - **Type**: Integer
-- **Default**: `3`
-- **Description**: Minimum threshold for test flakeness. Only tests with at least this many flake occurrences will be displayed in the TUI.
+- **Default**: `0` (disabled)
+- **Description**: Minimum threshold for test flakeness. Only tests with at least this many flake occurrences will be displayed in the TUI. Set to `0` to disable.
 - **Example**: `signalhound abstract --min-flake 5`
 
 #### `--refresh-interval` / `-r`
